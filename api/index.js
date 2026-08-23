@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 // ===== الإعدادات =====
-const BOT_TOKEN = process.env.BOT_TOKEN || 'ضع_توكن_البوت_هنا';
+const BOT_TOKEN = process.env.BOT_TOKEN || '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = Number(process.env.ADMIN_ID || 123456789);
 
 const bot = new TelegramBot(BOT_TOKEN);
