@@ -2,8 +2,8 @@ const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = 1249312602; // 🔴 ضع الـ ID الخاص بك هنا
 
 // 🔴 ضع بيانات Upstash Redis هنا للحفظ الدائم
-const UPSTASH_URL = 'ضع_الـ_REST_URL_هنا';
-const UPSTASH_TOKEN = 'ضع_الـ_REST_TOKEN_هنا';
+const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
+const UPSTASH_TOKEN = 'ggAAAAAAAedwAAIgcDHy3otuz9WTBDBuEP6rZlEx9o-kdWW5EN2CbNz_FxNz1g';
 
 async function dbGet(key, defaultValue) {
   if (!UPSTASH_URL || UPSTASH_URL.includes('ضع_الـ')) return defaultValue;
