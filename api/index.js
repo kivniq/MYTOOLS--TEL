@@ -1,6 +1,5 @@
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
-// 🔴 امسح 123456789 وضع الـ ID الخاص بك في التلجرام هنا
-const ADMIN_ID = 1249312602; 
+const ADMIN_ID = 1249312602; // 🔴 ضع الـ ID الخاص بك هنا
 
 global.db = global.db || { visits: 0, apps: [] };
 const db = global.db;
@@ -48,7 +47,12 @@ module.exports = async (req, res) => {
         const chatId = msg.chat.id;
         const userId = msg.from ? msg.from.id : 0;
 
-        // التحقق من الـ ADMIN_ID
+        if (text === '/myid') {
+          await sendTelegramMessage(chatId, `🆔 الـ ID الخاص بك هو: \`${userId}\``);
+          res.setHeader('Content-Type', 'application/json');
+          return res.status(200).json({ ok: true });
+        }
+
         if (ADMIN_ID !== 123456789 && userId !== ADMIN_ID) {
           await sendTelegramMessage(chatId, `❌ غير مصرح لك. الـ ID الخاص بك هو: \`${userId}\``);
           res.setHeader('Content-Type', 'application/json');
@@ -62,7 +66,6 @@ module.exports = async (req, res) => {
           if (parts.length >= 3) {
             let photoUrl = null;
 
-            // استخراج الصورة سواء أُرسلت كـ Photo أو كـ Document
             if (msg.photo && msg.photo.length > 0) {
               const largestPhoto = msg.photo[msg.photo.length - 1];
               photoUrl = await getTelegramFileUrl(largestPhoto.file_id);
@@ -83,14 +86,12 @@ module.exports = async (req, res) => {
           } else {
             await sendTelegramMessage(chatId, "⚠️ التنسيق الصحيح:\n`/addapp الاسم | الوصف | رابط التحميل`");
           }
-        } else if (text === '/stats') {
+        } else if (text === '/stats' || text === '/start') {
           await sendTelegramMessage(chatId, `📊 *الإحصائيات:*\n👁 الزيارات: ${db.visits}\n📱 التطبيقات: ${db.apps.length}`);
         } else if (text.startsWith('/deleteapp')) {
           const id = text.replace('/deleteapp', '').trim();
           db.apps = db.apps.filter(a => a.id.toString() !== id && a.name !== id);
           await sendTelegramMessage(chatId, "✅ تم الحذف بنجاح.");
-        } else if (text === '/myid') {
-          await sendTelegramMessage(chatId, `🆔 الـ ID الخاص بك هو: \`${userId}\``);
         }
       }
       res.setHeader('Content-Type', 'application/json');
@@ -187,48 +188,90 @@ footer { border-top: 1px solid var(--border); padding: 30px 0; text-align: cente
   <footer><p>AHMED.DEV © 2026 — جميع الحقوق محفوظة</p></footer>
 </div>
 <script>
-const canvas = document.getElementById('bgCanvas');
-const ctx = canvas.getContext('2d');
-let particles = [];
+var canvas = document.getElementById('bgCanvas');
+var ctx = canvas.getContext('2d');
+var particles = [];
+
 function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
-window.addEventListener('resize', resizeCanvas); resizeCanvas();
-class Particle {
-  constructor() { this.x = Math.random() * canvas.width; this.y = Math.random() * canvas.height; this.size = Math.random() * 2 + 1; this.speedX = Math.random() * 1 - 0.5; this.speedY = Math.random() * 1 - 0.5; }
-  update() { this.x += this.speedX; this.y += this.speedY; if (this.x > canvas.width) this.x = 0; if (this.x < 0) this.x = canvas.width; if (this.y > canvas.height) this.y = 0; if (this.y < 0) this.y = canvas.height; }
-  draw() { ctx.fillStyle = 'rgba(0, 240, 255, 0.4)'; ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2); ctx.fill(); }
+window.addEventListener('resize', resizeCanvas); 
+resizeCanvas();
+
+function Particle() {
+  this.x = Math.random() * canvas.width;
+  this.y = Math.random() * canvas.height;
+  this.size = Math.random() * 2 + 1;
+  this.speedX = Math.random() * 1 - 0.5;
+  this.speedY = Math.random() * 1 - 0.5;
 }
-function initParticles() { particles = []; for (let i = 0; i < 50; i++) particles.push(new Particle()); }
+Particle.prototype.update = function() {
+  this.x += this.speedX; this.y += this.speedY;
+  if (this.x > canvas.width) this.x = 0;
+  if (this.x < 0) this.x = canvas.width;
+  if (this.y > canvas.height) this.y = 0;
+  if (this.y < 0) this.y = canvas.height;
+};
+Particle.prototype.draw = function() {
+  ctx.fillStyle = 'rgba(0, 240, 255, 0.4)';
+  ctx.beginPath();
+  ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+  ctx.fill();
+};
+
+function initParticles() { particles = []; for (var i = 0; i < 50; i++) particles.push(new Particle()); }
 initParticles();
-function animate() { ctx.clearRect(0, 0, canvas.width, canvas.height); particles.forEach(p => { p.update(); p.draw(); }); requestAnimationFrame(animate); }
+
+function animate() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  particles.forEach(function(p) { p.update(); p.draw(); });
+  requestAnimationFrame(animate);
+}
 animate();
-let allApps = [];
+
+var allApps = [];
+
 async function loadPortal() {
   try {
     await fetch('/api/visit', { method: 'POST' });
-    const res = await fetch('/api/site');
-    const data = await res.json();
+    var res = await fetch('/api/site');
+    var data = await res.json();
     document.getElementById('visitCount').innerText = data.visits || 0;
     document.getElementById('appCount').innerText = data.apps ? data.apps.length : 0;
     allApps = data.apps || [];
     renderApps(allApps);
   } catch (e) { console.error(e); }
 }
+
 function renderApps(apps) {
-  const grid = document.getElementById('appsGrid');
+  var grid = document.getElementById('appsGrid');
   if (!apps || apps.length === 0) {
     grid.innerHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
     return;
   }
-  grid.innerHTML = apps.map(app => {
-    const iconHtml = app.image ? `<img src="${app.image}" class="app-icon-img" alt="app icon">` : `<div class="app-icon">${(app.name || 'A').charAt(0).toUpperCase()}</div>`;
-    return `<div class="app-card"><div><div class="app-header">${iconHtml}<div class="app-title"><h3>${app.name}</h3></div></div><p class="app-desc">${app.description}</p></div><button class="btn-download" onclick="window.open('${app.download}', '_blank')"><span>تحميل التطبيق</span> ⬇️</button></div>`;
+  grid.innerHTML = apps.map(function(app) {
+    var iconHtml = app.image 
+      ? '<img src="' + app.image + '" class="app-icon-img" alt="app icon">' 
+      : '<div class="app-icon">' + ((app.name || 'A').charAt(0).toUpperCase()) + '</div>';
+    
+    return '<div class="app-card">' +
+      '<div>' +
+        '<div class="app-header">' + iconHtml + '<div class="app-title"><h3>' + app.name + '</h3></div></div>' +
+        '<p class="app-desc">' + app.description + '</p>' +
+      '</div>' +
+      '<button class="btn-download" onclick="window.open(\'' + app.download + '\', \'_blank\')">' +
+        '<span>تحميل التطبيق</span> ⬇️' +
+      '</button>' +
+    '</div>';
   }).join('');
 }
+
 function filterApps() {
-  const query = document.getElementById('searchInput').value.toLowerCase();
-  const filtered = allApps.filter(a => a.name.toLowerCase().includes(query) || a.description.toLowerCase().includes(query));
+  var query = document.getElementById('searchInput').value.toLowerCase();
+  var filtered = allApps.filter(function(a) {
+    return a.name.toLowerCase().indexOf(query) !== -1 || a.description.toLowerCase().indexOf(query) !== -1;
+  });
   renderApps(filtered);
 }
+
 loadPortal();
 </script>
 </body>
