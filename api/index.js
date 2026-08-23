@@ -1,8 +1,35 @@
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = 1249312602; // 🔴 ضع الـ ID الخاص بك هنا
 
-global.db = global.db || { visits: 0, apps: [] };
-const db = global.db;
+// 🔴 ضع بيانات Upstash Redis هنا للحفظ الدائم
+const UPSTASH_URL = 'ضع_الـ_REST_URL_هنا';
+const UPSTASH_TOKEN = 'ضع_الـ_REST_TOKEN_هنا';
+
+async function dbGet(key, defaultValue) {
+  if (!UPSTASH_URL || UPSTASH_URL.includes('ضع_الـ')) return defaultValue;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${key}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+    });
+    const data = await res.json();
+    return data.result ? JSON.parse(data.result) : defaultValue;
+  } catch (e) {
+    return defaultValue;
+  }
+}
+
+async function dbSet(key, value) {
+  if (!UPSTASH_URL || UPSTASH_URL.includes('ضع_الـ')) return;
+  try {
+    await fetch(`${UPSTASH_URL}/set/${key}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+      body: JSON.stringify(JSON.stringify(value))
+    });
+  } catch (e) {
+    console.error('DB Set Error:', e);
+  }
+}
 
 async function sendTelegramMessage(chatId, text) {
   try {
@@ -31,11 +58,10 @@ async function getTelegramFileUrl(fileId) {
 
 module.exports = async (req, res) => {
   try {
-    const host = req.headers.host || 'localhost';
-    const parsedUrl = new URL(req.url, `http://${host}`);
-    const pathname = parsedUrl.pathname;
+    const url = req.url || '';
 
-    if (pathname === '/api/webhook' && req.method === 'POST') {
+    // مسار الـ Webhook الخاص بالتلجرام
+    if (url.includes('webhook') && req.method === 'POST') {
       let body = req.body;
       if (typeof body === 'string') {
         try { body = JSON.parse(body); } catch (e) {}
@@ -49,15 +75,16 @@ module.exports = async (req, res) => {
 
         if (text === '/myid') {
           await sendTelegramMessage(chatId, `🆔 الـ ID الخاص بك هو: \`${userId}\``);
-          res.setHeader('Content-Type', 'application/json');
           return res.status(200).json({ ok: true });
         }
 
         if (ADMIN_ID !== 123456789 && userId !== ADMIN_ID) {
           await sendTelegramMessage(chatId, `❌ غير مصرح لك. الـ ID الخاص بك هو: \`${userId}\``);
-          res.setHeader('Content-Type', 'application/json');
           return res.status(200).json({ ok: true });
         }
+
+        let apps = await dbGet('apps', []);
+        let visits = await dbGet('visits', 0);
 
         if (text.startsWith('/addapp')) {
           const content = text.replace('/addapp', '').trim();
@@ -65,7 +92,6 @@ module.exports = async (req, res) => {
 
           if (parts.length >= 3) {
             let photoUrl = null;
-
             if (msg.photo && msg.photo.length > 0) {
               const largestPhoto = msg.photo[msg.photo.length - 1];
               photoUrl = await getTelegramFileUrl(largestPhoto.file_id);
@@ -81,34 +107,39 @@ module.exports = async (req, res) => {
               image: photoUrl
             };
 
-            db.apps.push(newApp);
-            await sendTelegramMessage(chatId, `✅ *تمت إضافة التطبيق بنجاح!*${photoUrl ? ' 🖼' : ''}\n📱 *${newApp.name}*`);
+            apps.push(newApp);
+            await dbSet('apps', apps);
+            await sendTelegramMessage(chatId, `✅ *تمت إضافة التطبيق بنجاح وحفظه بالداتابيز!*${photoUrl ? ' 🖼' : ''}\n📱 *${newApp.name}*`);
           } else {
             await sendTelegramMessage(chatId, "⚠️ التنسيق الصحيح:\n`/addapp الاسم | الوصف | رابط التحميل`");
           }
         } else if (text === '/stats' || text === '/start') {
-          await sendTelegramMessage(chatId, `📊 *الإحصائيات:*\n👁 الزيارات: ${db.visits}\n📱 التطبيقات: ${db.apps.length}`);
+          await sendTelegramMessage(chatId, `📊 *الإحصائيات:*\n👁 الزيارات: ${visits}\n📱 التطبيقات: ${apps.length}`);
         } else if (text.startsWith('/deleteapp')) {
           const id = text.replace('/deleteapp', '').trim();
-          db.apps = db.apps.filter(a => a.id.toString() !== id && a.name !== id);
+          apps = apps.filter(a => a.id.toString() !== id && a.name !== id);
+          await dbSet('apps', apps);
           await sendTelegramMessage(chatId, "✅ تم الحذف بنجاح.");
         }
       }
-      res.setHeader('Content-Type', 'application/json');
       return res.status(200).json({ ok: true });
     }
 
-    if (pathname === '/api/visit' && req.method === 'POST') {
-      db.visits++;
-      res.setHeader('Content-Type', 'application/json');
+    // مسارات API للموقع
+    if (url.includes('visit') && req.method === 'POST') {
+      let visits = await dbGet('visits', 0);
+      visits++;
+      await dbSet('visits', visits);
       return res.status(200).json({ status: 'ok' });
     }
 
-    if (pathname === '/api/site' && req.method === 'GET') {
-      res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json({ visits: db.visits, apps: db.apps });
+    if (url.includes('site') && req.method === 'GET') {
+      const visits = await dbGet('visits', 0);
+      const apps = await dbGet('apps', []);
+      return res.status(200).json({ visits, apps });
     }
 
+    // واجهة المستخدم
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -231,14 +262,18 @@ var allApps = [];
 
 async function loadPortal() {
   try {
-    await fetch('/api/visit', { method: 'POST' });
+    fetch('/api/visit', { method: 'POST' }).catch(function(){});
     var res = await fetch('/api/site');
+    if (!res.ok) throw new Error('API Error');
     var data = await res.json();
     document.getElementById('visitCount').innerText = data.visits || 0;
     document.getElementById('appCount').innerText = data.apps ? data.apps.length : 0;
     allApps = data.apps || [];
     renderApps(allApps);
-  } catch (e) { console.error(e); }
+  } catch (e) { 
+    console.error(e); 
+    document.getElementById('appsGrid').innerHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+  }
 }
 
 function renderApps(apps) {
@@ -277,7 +312,6 @@ loadPortal();
 </body>
 </html>`);
   } catch (err) {
-    res.setHeader('Content-Type', 'application/json');
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 };
