@@ -22,7 +22,6 @@ module.exports = async (req, res) => {
     const parsedUrl = new URL(req.url, `http://${host}`);
     const pathname = parsedUrl.pathname;
 
-    // 1. استقبال أوامر التلجرام (Webhook)
     if (pathname === '/api/webhook' && req.method === 'POST') {
       let body = req.body;
       if (typeof body === 'string') {
@@ -61,146 +60,325 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // 2. تسجيل زيارة
     if (pathname === '/api/visit' && req.method === 'POST') {
       db.visits++;
       res.setHeader('Content-Type', 'application/json');
       return res.status(200).json({ status: 'ok' });
     }
 
-    // 3. جلب قائمة التطبيقات
     if (pathname === '/api/site' && req.method === 'GET') {
       res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json({ apps: db.apps });
+      return res.status(200).json({ visits: db.visits, apps: db.apps });
     }
 
-    // 4. عرض واجهة الموقع HTML
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AHMED — مطور تطبيقات جوال</title>
+<title>AHMED — مطور تطبيقات وسيرفرات</title>
 <style>
-:root{
-  --bg:#030711;--panel:#08101e;--line:#16263b;
-  --cyan:#08dff5;--text:#eaf7ff;--shadow:0 0 35px rgba(0,220,255,.10);
+:root {
+  --bg: #030712;
+  --panel: rgba(11, 19, 38, 0.75);
+  --border: rgba(0, 240, 255, 0.2);
+  --cyan: #00f0ff;
+  --purple: #7000ff;
+  --text: #f0f6fc;
+  --muted: #8b949e;
 }
-*{box-sizing:border-box;margin:0;padding:0}
-body{
-  font-family:Tahoma,Arial,sans-serif;background:
-  radial-gradient(circle at 15% 10%,rgba(0,220,255,.09),transparent 28%),
-  radial-gradient(circle at 85% 35%,rgba(124,52,255,.08),transparent 30%),
-  var(--bg);color:var(--text);line-height:1.8;overflow-x:hidden
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', Tahoma, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
 }
-a{text-decoration:none;color:inherit}
-button{cursor:pointer;font:inherit}
-.container{width:min(1080px,92%);margin:auto}
-header{
-  position:fixed;top:0;left:0;right:0;height:68px;z-index:50;
-  background:rgba(3,7,17,.76);backdrop-filter:blur(18px);
-  border-bottom:1px solid rgba(20,45,70,.7)
+#bgCanvas {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  z-index: 0; pointer-events: none;
 }
-.nav{height:100%;display:flex;align-items:center;justify-content:space-between}
-.logo{display:flex;align-items:center;gap:10px;font-weight:900}
-.logo-mark{
-  width:38px;height:38px;border:1px solid var(--cyan);border-radius:50%;
-  display:grid;place-items:center;color:var(--cyan);box-shadow:0 0 18px rgba(0,220,255,.25)
+.wrapper { position: relative; z-index: 1; }
+header {
+  position: fixed; top: 0; left: 0; right: 0; height: 70px;
+  background: rgba(3, 7, 18, 0.85); backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border); z-index: 100;
+  display: flex; align-items: center;
 }
-.hero{min-height:75vh;display:grid;place-items:center;padding:105px 0 35px;text-align:center}
-.avatar{
-  width:108px;height:108px;margin:0 auto 22px;border-radius:50%;
-  display:grid;place-items:center;border:2px solid var(--cyan);
-  background:radial-gradient(circle,#122c43,#050a14 65%);
-  box-shadow:0 0 15px rgba(0,220,255,.35);font-size:27px;font-weight:900;color:#c8faff
+.nav {
+  width: min(1100px, 92%); margin: auto;
+  display: flex; justify-content: space-between; align-items: center;
 }
-.eyebrow{color:#00dff6;font-size:14px;font-weight:bold;margin-bottom:8px}
-h1{font-size:clamp(36px,6vw,68px);line-height:1.1;font-weight:950}
-.gradient{background:linear-gradient(90deg,#00dff6,#0aa6c8,#7848ff);-webkit-background-clip:text;color:transparent}
-.hero p{max-width:650px;margin:22px auto;color:#8293a8;font-size:15px}
-section{padding:40px 0}
-.section-title{text-align:center;margin-bottom:35px}
-.section-title small{color:var(--cyan);font-weight:bold}
-.section-title h2{font-size:30px;margin-top:3px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}
-.card{
-  background:linear-gradient(145deg,rgba(10,20,36,.94),rgba(4,10,20,.96));
-  border:1px solid var(--line);border-radius:13px;padding:20px;
-  box-shadow:var(--shadow);position:relative
+.logo {
+  display: flex; align-items: center; gap: 12px;
+  font-weight: 800; font-size: 18px; color: var(--text); text-decoration: none;
 }
-.project-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.project-icon{width:45px;height:45px;border:1px solid #14506a;border-radius:10px;display:grid;place-items:center;color:var(--cyan);font-weight:900}
-.project h3{font-size:19px}
-.project p{color:#8191a5;font-size:13px;margin:10px 0 15px}
-.card-actions button{width:100%;padding:10px;border-radius:7px;border:1px solid #00dff6;background:#00b8d0;color:#001017;font-weight:bold}
-footer{border-top:1px solid #101e30;padding:35px 0;text-align:center;color:#65778b;font-size:12px}
+.logo-icon {
+  width: 40px; height: 40px; border-radius: 12px;
+  background: linear-gradient(135deg, var(--cyan), var(--purple));
+  display: grid; place-items: center; color: #fff; font-size: 20px;
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+}
+.nav-links { display: flex; gap: 15px; align-items: center; }
+.btn-nav {
+  padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05); color: var(--text);
+  text-decoration: none; font-size: 14px; transition: 0.3s;
+}
+.btn-nav:hover { background: var(--cyan); color: #000; box-shadow: 0 0 15px var(--cyan); }
+.hero {
+  padding: 140px 0 60px; text-align: center; width: min(1100px, 92%); margin: auto;
+}
+.avatar-container {
+  position: relative; width: 110px; height: 110px; margin: 0 auto 20px;
+}
+.avatar {
+  width: 100%; height: 100%; border-radius: 50%;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  border: 2px solid var(--cyan); display: grid; place-items: center;
+  font-size: 36px; font-weight: bold; color: var(--cyan);
+  box-shadow: 0 0 25px rgba(0, 240, 255, 0.3); animation: float 4s ease-in-out infinite;
+}
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+.badge {
+  display: inline-block; padding: 6px 14px; border-radius: 20px;
+  background: rgba(0, 240, 255, 0.1); border: 1px solid var(--cyan);
+  color: var(--cyan); font-size: 13px; font-weight: 600; margin-bottom: 15px;
+}
+h1 { font-size: clamp(32px, 5vw, 54px); font-weight: 900; line-height: 1.2; }
+.gradient-text {
+  background: linear-gradient(90deg, var(--cyan), #3b82f6, var(--purple));
+  -webkit-background-clip: text; color: transparent;
+}
+p.subtitle { color: var(--muted); max-width: 600px; margin: 15px auto 30px; font-size: 16px; }
+.stats-grid {
+  display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-bottom: 40px;
+}
+.stat-card {
+  background: var(--panel); border: 1px solid var(--border); padding: 15px 25px;
+  border-radius: 12px; backdrop-filter: blur(10px); min-width: 140px;
+}
+.stat-card h3 { font-size: 22px; color: var(--cyan); }
+.stat-card p { font-size: 12px; color: var(--muted); }
+
+.controls {
+  width: min(1100px, 92%); margin: 0 auto 30px;
+  display: flex; gap: 15px; justify-content: space-between; flex-wrap: wrap;
+}
+.search-box {
+  flex: 1; min-width: 250px; position: relative;
+}
+.search-box input {
+  width: 100%; padding: 12px 20px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--border);
+  color: var(--text); outline: none; font-size: 14px; transition: 0.3s;
+}
+.search-box input:focus { border-color: var(--cyan); box-shadow: 0 0 15px rgba(0, 240, 255, 0.2); }
+
+.grid {
+  width: min(1100px, 92%); margin: auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;
+  padding-bottom: 80px;
+}
+.app-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 16px; padding: 22px; backdrop-filter: blur(10px);
+  transition: 0.3s ease; position: relative; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: space-between;
+}
+.app-card:hover {
+  transform: translateY(-5px); border-color: var(--cyan);
+  box-shadow: 0 10px 30px rgba(0, 240, 255, 0.15);
+}
+.app-header { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
+.app-icon {
+  width: 50px; height: 50px; border-radius: 12px;
+  background: linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(112, 0, 255, 0.2));
+  border: 1px solid var(--cyan); display: grid; place-items: center;
+  font-size: 22px; font-weight: bold; color: var(--cyan);
+}
+.app-title h3 { font-size: 18px; color: var(--text); }
+.app-desc { color: var(--muted); font-size: 14px; line-height: 1.6; margin-bottom: 20px; flex-grow: 1; }
+.btn-download {
+  width: 100%; padding: 12px; border-radius: 10px; border: none;
+  background: linear-gradient(90deg, var(--cyan), #00b8d0);
+  color: #030712; font-weight: bold; font-size: 14px; cursor: pointer;
+  transition: 0.3s; display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.btn-download:hover { box-shadow: 0 0 20px var(--cyan); opacity: 0.95; }
+
+footer {
+  border-top: 1px solid var(--border); padding: 30px 0; text-align: center;
+  color: var(--muted); font-size: 13px; background: rgba(3, 7, 18, 0.9);
+}
 </style>
 </head>
 <body>
 
-<header>
-  <div class="container nav">
-    <a href="#" class="logo"><span class="logo-mark">A</span><span>AHMED.DEV</span></a>
-  </div>
-</header>
+<canvas id="bgCanvas"></canvas>
 
-<main>
-<section class="hero">
-  <div class="container">
-    <div class="avatar">A</div>
-    <div class="eyebrow">AHMED</div>
-    <h1>مطور تطبيقات <span class="gradient">جوال</span></h1>
-    <p>أصنع تطبيقات حديثة وسريعة متصلة مباشرة بالتلجرام.</p>
-  </div>
-</section>
+<div class="wrapper">
+  <header>
+    <div class="nav">
+      <a href="#" class="logo">
+        <div class="logo-icon">A</div>
+        <span>AHMED.DEV</span>
+      </a>
+      <div class="nav-links">
+        <a href="https://t.me/kivniq" target="_blank" class="btn-nav">تليجرام</a>
+      </div>
+    </div>
+  </header>
 
-<section class="container">
-  <div class="section-title"><small>تطبيقاتي</small><h2>المعرض القابل للتحديث</h2></div>
-  <div class="grid" id="projectsGrid">
-    <p style="text-align:center;grid-column:1/-1;color:#65778b">جاري تحميل التطبيقات...</p>
-  </div>
-</section>
-</main>
+  <section class="hero">
+    <div class="avatar-container">
+      <div class="avatar">A</div>
+    </div>
+    <div class="badge">مطور تطبيقات ومساعدين AI</div>
+    <h1>المعرض السريع <span class="gradient-text">للتطبيقات</span></h1>
+    <p class="subtitle">منصة عرض التطبيقات والأدوات المدارة مباشرة بواسطة بوت التلجرام.</p>
+    
+    <div class="stats-grid">
+      <div class="stat-card">
+        <h3 id="visitCount">--</h3>
+        <p>إجمالي الزيارات</p>
+      </div>
+      <div class="stat-card">
+        <h3 id="appCount">--</h3>
+        <p>التطبيقات المتاحة</p>
+      </div>
+      <div class="stat-card">
+        <h3>2026</h3>
+        <p>النسخة النشطة</p>
+      </div>
+    </div>
+  </section>
 
-<footer>
-  <div>AHMED.DEV © 2026</div>
-</footer>
+  <div class="controls">
+    <div class="search-box">
+      <input type="text" id="searchInput" placeholder="ابحث عن تطبيق..." oninput="filterApps()">
+    </div>
+  </div>
+
+  <main class="grid" id="appsGrid">
+    <p style="grid-column: 1/-1; text-align: center; color: var(--muted);">جاري تحميل البيانات...</p>
+  </main>
+
+  <footer>
+    <p>AHMED.DEV © 2026 — جميع الحقوق محفوظة</p>
+  </footer>
+</div>
 
 <script>
-async function loadData(){
-  try{
-    await fetch("/api/visit",{method:"POST"});
-    const r = await fetch("/api/site");
-    if(!r.ok) return;
-    const data = await r.json();
-    const grid = document.getElementById("projectsGrid");
-    if(grid && Array.isArray(data.apps)){
-      if(data.apps.length === 0){
-        grid.innerHTML = '<p style="text-align:center;grid-column:1/-1;color:#65778b">لا توجد تطبيقات مضافة بعد.</p>';
-        return;
-      }
-      grid.innerHTML = data.apps.map(function(a){
-        return '<article class="card project">' +
-          '<div class="project-head">' +
-            '<div><h3>' + (a.name || '') + '</h3></div>' +
-            '<div class="project-icon">' + (a.name || 'A').charAt(0).toUpperCase() + '</div>' +
-          '</div>' +
-          '<p>' + (a.description || 'تطبيق حديث') + '</p>' +
-          '<div class="card-actions">' +
-            '<button onclick="window.open(\\\'' + a.download + '\\\',\\\'_blank\\\')">تحميل التطبيق</button>' +
-          '</div>' +
-        '</article>';
-      }).join('');
-    }
-  }catch(e){ console.error(e); }
+// خلفية الجزيئات المتحركة (Canvas Particles)
+const canvas = document.getElementById('bgCanvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
 }
-loadData();
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+class Particle {
+  constructor() {
+    this.x = Math.random() * canvas.width;
+    this.y = Math.random() * canvas.height;
+    this.size = Math.random() * 2 + 1;
+    this.speedX = Math.random() * 1 - 0.5;
+    this.speedY = Math.random() * 1 - 0.5;
+  }
+  update() {
+    this.x += this.speedX;
+    this.y += this.speedY;
+    if (this.x > canvas.width) this.x = 0;
+    if (this.x < 0) this.x = canvas.width;
+    if (this.y > canvas.height) this.y = 0;
+    if (this.y < 0) this.y = canvas.height;
+  }
+  draw() {
+    ctx.fillStyle = 'rgba(0, 240, 255, 0.4)';
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function initParticles() {
+  particles = [];
+  for (let i = 0; i < 50; i++) particles.push(new Particle());
+}
+initParticles();
+
+function animate() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  particles.forEach(p => { p.update(); p.draw(); });
+  requestAnimationFrame(animate);
+}
+animate();
+
+// جلب وتصفية التطبيقات
+let allApps = [];
+
+async function loadPortal() {
+  try {
+    await fetch('/api/visit', { method: 'POST' });
+    const res = await fetch('/api/site');
+    const data = await res.json();
+    
+    document.getElementById('visitCount').innerText = data.visits || 0;
+    document.getElementById('appCount').innerText = data.apps ? data.apps.length : 0;
+    
+    allApps = data.apps || [];
+    renderApps(allApps);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderApps(apps) {
+  const grid = document.getElementById('appsGrid');
+  if (!apps || apps.length === 0) {
+    grid.innerHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+    return;
+  }
+  grid.innerHTML = apps.map(app => \`
+    <div class="app-card">
+      <div>
+        <div class="app-header">
+          <div class="app-icon">\${(app.name || 'A').charAt(0).toUpperCase()}</div>
+          <div class="app-title">
+            <h3>\${app.name}</h3>
+          </div>
+        </div>
+        <p class="app-desc">\${app.description}</p>
+      </div>
+      <button class="btn-download" onclick="window.open('\${app.download}', '_blank')">
+        <span>تحميل التطبيق</span> ⬇️
+      </button>
+    </div>
+  \`).join('');
+}
+
+function filterApps() {
+  const query = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = allApps.filter(a => 
+    a.name.toLowerCase().includes(query) || 
+    a.description.toLowerCase().includes(query)
+  );
+  renderApps(filtered);
+}
+
+loadPortal();
 </script>
 </body>
 </html>`);
   } catch (err) {
-    console.error('Server Error:', err);
     res.setHeader('Content-Type', 'application/json');
     return res.status(500).json({ error: 'Internal Server Error' });
   }
