@@ -1,25 +1,27 @@
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
-const ADMIN_ID = 1249312602; // 🔴 ضع الـ ID الخاص بك هنا
+const ADMIN_ID = 1249312602;
 
-// 🔴 ضع بيانات Upstash Redis هنا للحفظ الدائم
 const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
-const UPSTASH_TOKEN = 'ggAAAAAAAedwAAIgcDHy3otuz9WTBDBuEP6rZlEx9o-kdWW5EN2CbNz_FxNz1g';
+const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
 
 async function dbGet(key, defaultValue) {
-  if (!UPSTASH_URL || UPSTASH_URL.includes('ضع_الـ')) return defaultValue;
+  if (!UPSTASH_URL) return defaultValue;
   try {
     const res = await fetch(`${UPSTASH_URL}/get/${key}`, {
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
     });
     const data = await res.json();
-    return data.result ? JSON.parse(data.result) : defaultValue;
+    if (data && data.result !== undefined && data.result !== null) {
+      return typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
+    }
+    return defaultValue;
   } catch (e) {
     return defaultValue;
   }
 }
 
 async function dbSet(key, value) {
-  if (!UPSTASH_URL || UPSTASH_URL.includes('ضع_الـ')) return;
+  if (!UPSTASH_URL) return;
   try {
     await fetch(`${UPSTASH_URL}/set/${key}`, {
       method: 'POST',
@@ -58,10 +60,16 @@ async function getTelegramFileUrl(fileId) {
 
 module.exports = async (req, res) => {
   try {
-    const url = req.url || '';
+    const reqUrl = req.url || '';
+    const forwardedUri = req.headers['x-forwarded-uri'] || '';
+    const fullTarget = (reqUrl + ' ' + forwardedUri).toLowerCase();
 
-    // مسار الـ Webhook الخاص بالتلجرام
-    if (url.includes('webhook') && req.method === 'POST') {
+    const isWebhook = fullTarget.includes('webhook') || fullTarget.includes('action=webhook');
+    const isVisit = fullTarget.includes('visit') || fullTarget.includes('action=visit');
+    const isSite = fullTarget.includes('site') || fullTarget.includes('action=site');
+
+    // مسار Telegram Webhook
+    if (isWebhook && req.method === 'POST') {
       let body = req.body;
       if (typeof body === 'string') {
         try { body = JSON.parse(body); } catch (e) {}
@@ -78,7 +86,7 @@ module.exports = async (req, res) => {
           return res.status(200).json({ ok: true });
         }
 
-        if (ADMIN_ID !== 123456789 && userId !== ADMIN_ID) {
+        if (ADMIN_ID && userId !== ADMIN_ID) {
           await sendTelegramMessage(chatId, `❌ غير مصرح لك. الـ ID الخاص بك هو: \`${userId}\``);
           return res.status(200).json({ ok: true });
         }
@@ -125,21 +133,23 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // مسارات API للموقع
-    if (url.includes('visit') && req.method === 'POST') {
+    // زيادة الزيارات
+    if (isVisit && req.method === 'POST') {
       let visits = await dbGet('visits', 0);
       visits++;
       await dbSet('visits', visits);
       return res.status(200).json({ status: 'ok' });
     }
 
-    if (url.includes('site') && req.method === 'GET') {
+    // جلب البيانات للموقع
+    if (isSite) {
       const visits = await dbGet('visits', 0);
       const apps = await dbGet('apps', []);
+      res.setHeader('Content-Type', 'application/json');
       return res.status(200).json({ visits, apps });
     }
 
-    // واجهة المستخدم
+    // واجهة الموقع (HTML)
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -262,8 +272,8 @@ var allApps = [];
 
 async function loadPortal() {
   try {
-    fetch('/api/visit', { method: 'POST' }).catch(function(){});
-    var res = await fetch('/api/site');
+    fetch('/?action=visit', { method: 'POST' }).catch(function(){});
+    var res = await fetch('/?action=site');
     if (!res.ok) throw new Error('API Error');
     var data = await res.json();
     document.getElementById('visitCount').innerText = data.visits || 0;
