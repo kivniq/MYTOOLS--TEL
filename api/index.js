@@ -4,8 +4,8 @@ const http = require('http');
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = 1249312602;
 
-const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
-const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
+const UPSTASH_URL = 'https://inspired-trout-98698.upstash.io';
+const UPSTASH_TOKEN = 'gQAAAAAAAYGKAAIgcDI0ZTQ4ODE4N2Q2YWE0YzI5YWI4OTg5ZWRhZWQ2NzEwMw';
 
 // طلبات شبكة آمنة متوافقة مع كل إصدارات Node.js
 function makeRequest(urlStr, options = {}, bodyData = null) {
