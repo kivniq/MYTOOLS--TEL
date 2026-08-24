@@ -1,3 +1,5 @@
+'use strict';
+
 const https = require('https');
 
 /* =========================================================
@@ -5,56 +7,47 @@ const https = require('https');
    ========================================================= */
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = Number(process.env.ADMIN_ID);
+const ADMIN_ID = Number(process.env.ADMIN_ID || 0);
 
 const UPSTASH_URL = process.env.UPSTASH_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
 
-
 /* =========================================================
-   CONFIG CHECK
+   ENV CHECK
    ========================================================= */
 
-function configError() {
+function getMissingEnv() {
   const missing = [];
 
-  if (!BOT_TOKEN) missing.push('1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0');
-  if (!ADMIN_ID) missing.push('1249312602');
-  if (!UPSTASH_URL) missing.push('https://inspired-trout-98698.upstash.io');
-  if (!UPSTASH_TOKEN) missing.push('gQAAAAAAAYGKAAIgcDI0ZTQ4ODE4N2Q2YWE0YzI5YWI4OTg5ZWRhZWQ2NzEwMw');
+  if (!BOT_TOKEN) missing.push('BOT_TOKEN');
+  if (!process.env.ADMIN_ID) missing.push('ADMIN_ID');
+  if (!UPSTASH_URL) missing.push('UPSTASH_URL');
+  if (!UPSTASH_TOKEN) missing.push('UPSTASH_TOKEN');
 
   return missing;
 }
 
-
 /* =========================================================
-   UPSTASH REST
+   GENERIC HTTPS REQUEST
    ========================================================= */
 
-function upstashCommand(command) {
+function httpsRequest({
+  hostname,
+  path,
+  method = 'GET',
+  headers = {},
+  body = null
+}) {
   return new Promise((resolve, reject) => {
-    try {
-      if (!UPSTASH_URL || !UPSTASH_TOKEN) {
-        return reject(new Error('Upstash environment variables are missing'));
-      }
-
-      const parsedUrl = new URL(UPSTASH_URL);
-
-      const payload = JSON.stringify(command);
-
-      const options = {
-        hostname: parsedUrl.hostname,
+    const request = https.request(
+      {
+        hostname,
         port: 443,
-        path: parsedUrl.pathname || '/',
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${UPSTASH_TOKEN}`,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload)
-        }
-      };
-
-      const request = https.request(options, (response) => {
+        path,
+        method,
+        headers
+      },
+      response => {
         let data = '';
 
         response.setEncoding('utf8');
@@ -64,84 +57,168 @@ function upstashCommand(command) {
         });
 
         response.on('end', () => {
-          if (response.statusCode < 200 || response.statusCode >= 300) {
-            return reject(
-              new Error(
-                `Upstash HTTP ${response.statusCode}: ${data}`
-              )
-            );
-          }
+          let parsed = data;
 
           try {
-            const json = JSON.parse(data);
+            parsed = JSON.parse(data);
+          } catch (_) {}
 
-            if (json && json.error) {
-              return reject(new Error(json.error));
-            }
-
-            resolve(json);
-          } catch (error) {
-            reject(
-              new Error(
-                `Invalid Upstash response: ${data}`
-              )
-            );
-          }
+          resolve({
+            statusCode: response.statusCode,
+            headers: response.headers,
+            data: parsed
+          });
         });
-      });
+      }
+    );
 
-      request.setTimeout(10000, () => {
-        request.destroy(
-          new Error('Upstash request timeout')
-        );
-      });
+    request.setTimeout(15000, () => {
+      request.destroy(new Error('Request timeout'));
+    });
 
-      request.on('error', reject);
+    request.on('error', reject);
 
-      request.write(payload);
-      request.end();
-
-    } catch (error) {
-      reject(error);
+    if (body !== null && body !== undefined) {
+      request.write(
+        typeof body === 'string'
+          ? body
+          : JSON.stringify(body)
+      );
     }
+
+    request.end();
   });
 }
 
+/* =========================================================
+   UPSTASH
+   ========================================================= */
+
+function encodeRedisKey(key) {
+  return encodeURIComponent(String(key));
+}
+
+async function upstashCommand(command) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
+    throw new Error('Upstash environment variables are missing');
+  }
+
+  const base = UPSTASH_URL.replace(/\/+$/, '');
+
+  const parsed = new URL(base);
+
+  const result = await httpsRequest({
+    hostname: parsed.hostname,
+    path: parsed.pathname === '/'
+      ? ''
+      : parsed.pathname,
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${UPSTASH_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body: command
+  });
+
+  if (
+    result.statusCode < 200 ||
+    result.statusCode >= 300
+  ) {
+    throw new Error(
+      `Upstash HTTP ${result.statusCode}: ${JSON.stringify(result.data)}`
+    );
+  }
+
+  if (
+    !result.data ||
+    result.data.result === undefined
+  ) {
+    throw new Error(
+      `Invalid Upstash response: ${JSON.stringify(result.data)}`
+    );
+  }
+
+  return result.data.result;
+}
 
 /* =========================================================
-   DATABASE
+   DATABASE GET
    ========================================================= */
 
 async function dbGet(key, defaultValue) {
   try {
-    const response = await upstashCommand([
-      'GET',
-      key
-    ]);
+    let result;
+
+    /*
+      استخدام صيغة REST الخاصة بـ Upstash:
+      POST /
+      ["GET", "key"]
+    */
+
+    try {
+      result = await upstashCommand([
+        'GET',
+        String(key)
+      ]);
+    } catch (firstError) {
+      /*
+        Fallback إلى endpoint:
+        /get/key
+      */
+
+      const base = UPSTASH_URL.replace(/\/+$/, '');
+      const parsed = new URL(
+        `${base}/get/${encodeRedisKey(key)}`
+      );
+
+      const response = await httpsRequest({
+        hostname: parsed.hostname,
+        path:
+          parsed.pathname +
+          parsed.search,
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${UPSTASH_TOKEN}`,
+          Accept: 'application/json'
+        }
+      });
+
+      if (
+        response.statusCode < 200 ||
+        response.statusCode >= 300
+      ) {
+        throw firstError;
+      }
+
+      result =
+        response.data &&
+        response.data.result !== undefined
+          ? response.data.result
+          : null;
+    }
 
     if (
-      !response ||
-      response.result === null ||
-      response.result === undefined
+      result === null ||
+      result === undefined ||
+      result === ''
     ) {
       return defaultValue;
     }
 
-    let value = response.result;
-
-    if (typeof value === 'string') {
+    if (typeof result === 'string') {
       try {
-        value = JSON.parse(value);
+        return JSON.parse(result);
       } catch (_) {
-        // String عادي
+        return result;
       }
     }
 
-    return value;
+    return result;
 
   } catch (error) {
     console.error(
-      `UPSTASH GET [${key}] ERROR:`,
+      'dbGet error:',
       error.message
     );
 
@@ -149,137 +226,118 @@ async function dbGet(key, defaultValue) {
   }
 }
 
+/* =========================================================
+   DATABASE SET
+   ========================================================= */
 
 async function dbSet(key, value) {
   try {
     const serialized = JSON.stringify(value);
 
-    const response = await upstashCommand([
-      'SET',
-      key,
-      serialized
-    ]);
+    let result;
 
-    if (
-      !response ||
-      response.result !== 'OK'
-    ) {
-      throw new Error(
-        `SET failed: ${JSON.stringify(response)}`
+    try {
+      /*
+        Upstash command:
+        ["SET", "key", "value"]
+      */
+
+      result = await upstashCommand([
+        'SET',
+        String(key),
+        serialized
+      ]);
+
+    } catch (firstError) {
+      /*
+        Fallback إلى:
+        /set/key
+      */
+
+      const base = UPSTASH_URL.replace(/\/+$/, '');
+
+      const parsed = new URL(
+        `${base}/set/${encodeRedisKey(key)}`
       );
+
+      const response = await httpsRequest({
+        hostname: parsed.hostname,
+        path:
+          parsed.pathname +
+          parsed.search,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${UPSTASH_TOKEN}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify(serialized)
+      });
+
+      if (
+        response.statusCode < 200 ||
+        response.statusCode >= 300
+      ) {
+        throw firstError;
+      }
+
+      result =
+        response.data &&
+        response.data.result !== undefined
+          ? response.data.result
+          : null;
     }
 
-    console.log(
-      `UPSTASH SET SUCCESS: ${key}`
-    );
-
-    return true;
+    return result;
 
   } catch (error) {
     console.error(
-      `UPSTASH SET [${key}] ERROR:`,
+      'dbSet error:',
       error.message
     );
 
-    return false;
+    throw error;
   }
 }
 
-
 /* =========================================================
-   TELEGRAM
+   TELEGRAM REQUEST
    ========================================================= */
 
-function telegramReq(path, method = 'GET', body = null) {
-  return new Promise((resolve, reject) => {
-    try {
-      if (!BOT_TOKEN) {
-        return reject(
-          new Error('BOT_TOKEN is missing')
-        );
-      }
+async function telegramReq(
+  path,
+  method = 'GET',
+  body = null
+) {
+  if (!BOT_TOKEN) {
+    throw new Error('BOT_TOKEN is missing');
+  }
 
-      const url =
-        `https://api.telegram.org/bot${BOT_TOKEN}${path}`;
+  const parsed = new URL(
+    `https://api.telegram.org/bot${BOT_TOKEN}${path}`
+  );
 
-      const parsedUrl = new URL(url);
-
-      let payload = null;
-
-      if (body !== null) {
-        payload = JSON.stringify(body);
-      }
-
-      const headers = {};
-
-      if (payload) {
-        headers['Content-Type'] = 'application/json';
-        headers['Content-Length'] =
-          Buffer.byteLength(payload);
-      }
-
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method,
-        headers
-      };
-
-      const request = https.request(
-        options,
-        (response) => {
-          let data = '';
-
-          response.setEncoding('utf8');
-
-          response.on('data', chunk => {
-            data += chunk;
-          });
-
-          response.on('end', () => {
-            try {
-              resolve(JSON.parse(data));
-            } catch (error) {
-              reject(
-                new Error(
-                  `Invalid Telegram response: ${data}`
-                )
-              );
-            }
-          });
-        }
-      );
-
-      request.setTimeout(10000, () => {
-        request.destroy(
-          new Error('Telegram request timeout')
-        );
-      });
-
-      request.on('error', reject);
-
-      if (payload) {
-        request.write(payload);
-      }
-
-      request.end();
-
-    } catch (error) {
-      reject(error);
-    }
+  const response = await httpsRequest({
+    hostname: parsed.hostname,
+    path:
+      parsed.pathname +
+      parsed.search,
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body
   });
+
+  return response.data;
 }
 
-
 /* =========================================================
-   TELEGRAM MESSAGE
+   SEND TELEGRAM MESSAGE
    ========================================================= */
 
-async function sendTelegramMessage(
-  chatId,
-  text
-) {
+async function sendTelegramMessage(chatId, text) {
   try {
     return await telegramReq(
       '/sendMessage',
@@ -287,8 +345,7 @@ async function sendTelegramMessage(
       {
         chat_id: chatId,
         text,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
+        parse_mode: 'Markdown'
       }
     );
   } catch (error) {
@@ -300,7 +357,6 @@ async function sendTelegramMessage(
     return null;
   }
 }
-
 
 /* =========================================================
    TELEGRAM FILE
@@ -321,7 +377,7 @@ async function getTelegramFileUrl(fileId) {
       return (
         `https://api.telegram.org/file/bot` +
         `${BOT_TOKEN}/` +
-        `${result.result.file_path}`
+        result.result.file_path
       );
     }
 
@@ -335,24 +391,18 @@ async function getTelegramFileUrl(fileId) {
   return null;
 }
 
-
 /* =========================================================
    REQUEST BODY
    ========================================================= */
 
 async function getRequestBody(req) {
+  if (req.body !== undefined && req.body !== null) {
 
-  if (req.body) {
-
-    if (
-      typeof req.body === 'object'
-    ) {
+    if (typeof req.body === 'object') {
       return req.body;
     }
 
-    if (
-      typeof req.body === 'string'
-    ) {
+    if (typeof req.body === 'string') {
       try {
         return JSON.parse(req.body);
       } catch (_) {
@@ -361,8 +411,7 @@ async function getRequestBody(req) {
     }
   }
 
-  return new Promise((resolve) => {
-
+  return new Promise(resolve => {
     let data = '';
 
     req.on('data', chunk => {
@@ -370,9 +419,9 @@ async function getRequestBody(req) {
     });
 
     req.on('end', () => {
-
       if (!data) {
-        return resolve({});
+        resolve({});
+        return;
       }
 
       try {
@@ -380,30 +429,20 @@ async function getRequestBody(req) {
       } catch (_) {
         resolve({});
       }
-
     });
 
     req.on('error', () => {
       resolve({});
     });
-
   });
 }
 
-
 /* =========================================================
-   RESPONSE
+   RESPONSE HELPERS
    ========================================================= */
 
-function sendJson(
-  res,
-  statusCode,
-  data
-) {
-
-  if (res.headersSent) {
-    return;
-  }
+function sendJson(res, statusCode, data) {
+  if (res.headersSent) return;
 
   res.statusCode = statusCode;
 
@@ -432,16 +471,8 @@ function sendJson(
   );
 }
 
-
-function sendHtml(
-  res,
-  statusCode,
-  html
-) {
-
-  if (res.headersSent) {
-    return;
-  }
+function sendHtml(res, statusCode, html) {
+  if (res.headersSent) return;
 
   res.statusCode = statusCode;
 
@@ -453,84 +484,77 @@ function sendHtml(
   res.end(html);
 }
 
-
 /* =========================================================
-   URL ACTION
+   HEALTH CHECK
    ========================================================= */
 
-function getAction(req) {
+async function healthCheck() {
+  const missing = getMissingEnv();
 
-  if (
-    req.query &&
-    typeof req.query === 'object' &&
-    req.query.action
-  ) {
-    return String(
-      req.query.action
-    ).toLowerCase();
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      environment: false,
+      missing
+    };
   }
 
-  const rawUrl =
-    req.url || '';
+  let telegram = false;
+  let upstash = false;
 
-  const match =
-    rawUrl.match(
-      /[?&]action=([^&]+)/i
+  try {
+    const tg = await telegramReq('/getMe');
+
+    telegram =
+      !!(
+        tg &&
+        tg.ok &&
+        tg.result
+      );
+  } catch (_) {
+    telegram = false;
+  }
+
+  try {
+    const value = await dbGet(
+      '__health_check__',
+      null
     );
 
-  if (match) {
-    try {
-      return decodeURIComponent(
-        match[1]
-      ).toLowerCase();
-    } catch (_) {
-      return '';
-    }
+    /*
+      نجاح الوصول للـ Redis حتى لو المفتاح غير موجود
+    */
+    upstash = true;
+
+    void value;
+  } catch (_) {
+    upstash = false;
   }
 
-  return '';
+  return {
+    ok: telegram && upstash,
+    environment: true,
+    telegram,
+    upstash
+  };
 }
 
-
 /* =========================================================
-   NORMALIZE APPS
-   ========================================================= */
-
-function normalizeApps(apps) {
-
-  if (!Array.isArray(apps)) {
-    return [];
-  }
-
-  return apps.map(app => ({
-    id: app.id || Date.now(),
-    name: String(app.name || ''),
-    description: String(
-      app.description || ''
-    ),
-    download: String(
-      app.download || ''
-    ),
-    image: app.image || null
-  }));
-}
-
-
-/* =========================================================
-   HANDLER
+   MAIN HANDLER
    ========================================================= */
 
 async function handler(req, res) {
 
   try {
 
-    /* OPTIONS */
+    /*
+      CORS OPTIONS
+    */
 
     if (
       req.method &&
       req.method.toUpperCase() === 'OPTIONS'
     ) {
-
       res.statusCode = 204;
 
       res.setHeader(
@@ -551,24 +575,27 @@ async function handler(req, res) {
       return res.end();
     }
 
-
-    const method =
-      (
-        req.method ||
-        'GET'
-      ).toUpperCase();
+    const missing = getMissingEnv();
 
     const rawUrl =
       req.url || '/';
 
+    const method =
+      String(req.method || 'GET')
+        .toUpperCase();
+
+    const url = new URL(
+      rawUrl,
+      'https://vercel.local'
+    );
+
     const pathname =
-      rawUrl
-        .split('?')[0]
-        .toLowerCase();
+      url.pathname.toLowerCase();
 
     const action =
-      getAction(req);
-
+      String(
+        url.searchParams.get('action') || ''
+      ).toLowerCase();
 
     /* =====================================================
        HEALTH
@@ -578,64 +605,15 @@ async function handler(req, res) {
       action === 'health' ||
       pathname.endsWith('/health')
     ) {
-
-      const missing =
-        configError();
-
-      if (missing.length > 0) {
-
-        return sendJson(
-          res,
-          500,
-          {
-            ok: false,
-            status: 'CONFIG_ERROR',
-            missing
-          }
-        );
-      }
-
-      let dbOk = false;
-
-      try {
-
-        const test =
-          await upstashCommand([
-            'PING'
-          ]);
-
-        dbOk =
-          test &&
-          test.result === 'PONG';
-
-      } catch (error) {
-
-        console.error(
-          'Health DB error:',
-          error.message
-        );
-      }
+      const result =
+        await healthCheck();
 
       return sendJson(
         res,
-        dbOk ? 200 : 500,
-        {
-          ok: dbOk,
-          database: dbOk
-            ? 'connected'
-            : 'error',
-          telegram:
-            BOT_TOKEN
-              ? 'configured'
-              : 'missing',
-          admin:
-            ADMIN_ID
-              ? ADMIN_ID
-              : null
-        }
+        result.ok ? 200 : 500,
+        result
       );
     }
-
 
     /* =====================================================
        WEBHOOK
@@ -645,20 +623,39 @@ async function handler(req, res) {
       method === 'POST' &&
       (
         action === 'webhook' ||
-        pathname.includes('webhook')
+        pathname.endsWith('/webhook')
       );
-
 
     if (isWebhook) {
 
+      if (missing.length > 0) {
+        console.error(
+          'Missing environment variables:',
+          missing
+        );
+
+        return sendJson(
+          res,
+          500,
+          {
+            ok: false,
+            error: 'Environment variables missing',
+            missing
+          }
+        );
+      }
+
       const body =
         await getRequestBody(req);
+
+      /*
+        Telegram Update
+      */
 
       if (
         !body ||
         !body.message
       ) {
-
         return sendJson(
           res,
           200,
@@ -669,9 +666,20 @@ async function handler(req, res) {
         );
       }
 
-
       const msg =
         body.message;
+
+      const chatId =
+        msg.chat &&
+        msg.chat.id
+          ? msg.chat.id
+          : null;
+
+      const userId =
+        msg.from &&
+        msg.from.id
+          ? msg.from.id
+          : null;
 
       const text =
         String(
@@ -680,21 +688,21 @@ async function handler(req, res) {
           ''
         ).trim();
 
-      const chatId =
-        msg.chat
-          ? msg.chat.id
-          : 0;
+      if (!chatId) {
+        return sendJson(
+          res,
+          200,
+          { ok: true }
+        );
+      }
 
-      const userId =
-        msg.from
-          ? msg.from.id
-          : 0;
-
-
-      /* MY ID */
+      /* ===================================================
+         /myid
+         =================================================== */
 
       if (
-        text === '/myid'
+        text === '/myid' ||
+        text.startsWith('/myid ')
       ) {
 
         await sendTelegramMessage(
@@ -709,17 +717,18 @@ async function handler(req, res) {
         );
       }
 
-
-      /* SECURITY */
+      /* ===================================================
+         ADMIN CHECK
+         =================================================== */
 
       if (
         ADMIN_ID &&
-        userId !== ADMIN_ID
+        Number(userId) !== ADMIN_ID
       ) {
 
         await sendTelegramMessage(
           chatId,
-          `❌ *غير مصرح لك باستخدام البوت.*\n\n🆔 ID الخاص بك:\n\`${userId}\``
+          `❌ *غير مصرح لك باستخدام لوحة الإدارة.*\n\n🆔 ID الخاص بك:\n\`${userId}\``
         );
 
         return sendJson(
@@ -729,28 +738,35 @@ async function handler(req, res) {
         );
       }
 
-
-      /* LOAD DATABASE */
+      /* ===================================================
+         LOAD DATABASE
+         =================================================== */
 
       let apps =
-        normalizeApps(
-          await dbGet(
-            'apps',
-            []
-          )
+        await dbGet(
+          'apps',
+          []
         );
 
       let visits =
-        Number(
-          await dbGet(
-            'visits',
-            0
-          )
-        ) || 0;
+        await dbGet(
+          'visits',
+          0
+        );
 
+      if (!Array.isArray(apps)) {
+        apps = [];
+      }
+
+      if (
+        typeof visits !== 'number'
+      ) {
+        visits =
+          Number(visits) || 0;
+      }
 
       /* ===================================================
-         /START
+         /start
          =================================================== */
 
       if (
@@ -759,11 +775,10 @@ async function handler(req, res) {
 
         await sendTelegramMessage(
           chatId,
-          `🤖 *AHMED.DEV BOT*\n\n` +
-          `👋 أهلاً بك\n\n` +
+          `🤖 *لوحة إدارة التطبيقات*\n\n` +
           `📱 التطبيقات: *${apps.length}*\n` +
           `👁 الزيارات: *${visits}*\n\n` +
-          `📌 الأوامر المتاحة:\n\n` +
+          `الأوامر المتاحة:\n\n` +
           `/addapp الاسم | الوصف | الرابط\n` +
           `/deleteapp ID\n` +
           `/stats\n` +
@@ -777,9 +792,8 @@ async function handler(req, res) {
         );
       }
 
-
       /* ===================================================
-         /STATS
+         /stats
          =================================================== */
 
       if (
@@ -800,33 +814,25 @@ async function handler(req, res) {
         );
       }
 
-
       /* ===================================================
-         /ADDAPP
+         /addapp
          =================================================== */
 
       if (
-        text.startsWith(
-          '/addapp'
-        )
+        text.startsWith('/addapp')
       ) {
 
         const content =
           text
-            .replace(
-              /^\/addapp\s*/i,
-              ''
-            )
+            .replace(/^\/addapp(@\w+)?/i, '')
             .trim();
 
         const parts =
           content
             .split('|')
             .map(
-              item =>
-                item.trim()
+              item => item.trim()
             );
-
 
         if (
           parts.length < 3 ||
@@ -849,17 +855,15 @@ async function handler(req, res) {
           );
         }
 
-
         let photoUrl = null;
 
-
-        /* PHOTO */
+        /*
+          صورة Telegram
+        */
 
         if (
-          Array.isArray(
-            msg.photo
-          ) &&
-          msg.photo.length
+          Array.isArray(msg.photo) &&
+          msg.photo.length > 0
         ) {
 
           const largest =
@@ -873,11 +877,13 @@ async function handler(req, res) {
             );
         }
 
-
-        /* IMAGE DOCUMENT */
+        /*
+          صورة كـ Document
+        */
 
         else if (
           msg.document &&
+          msg.document.file_id &&
           msg.document.mime_type &&
           msg.document.mime_type
             .startsWith('image/')
@@ -889,53 +895,52 @@ async function handler(req, res) {
             );
         }
 
-
-        /* CREATE APP */
-
         const newApp = {
-
           id: Date.now(),
-
-          name:
-            parts[0],
-
-          description:
-            parts[1],
-
-          download:
-            parts[2],
-
-          image:
-            photoUrl
-
+          name: parts[0],
+          description: parts[1],
+          download: parts[2],
+          image: photoUrl,
+          createdAt:
+            new Date().toISOString()
         };
 
+        apps.push(newApp);
 
-        apps.push(
-          newApp
+        /*
+          IMPORTANT:
+          ننتظر عملية الحفظ فعليًا
+        */
+
+        await dbSet(
+          'apps',
+          apps
         );
 
+        /*
+          تحقق بعد الحفظ
+        */
 
-        /* SAVE */
-
-        const saved =
-          await dbSet(
+        const savedApps =
+          await dbGet(
             'apps',
-            apps
+            []
           );
 
-
-        /* SAVE FAILED */
+        const saved =
+          Array.isArray(savedApps) &&
+          savedApps.some(
+            app =>
+              String(app.id) ===
+              String(newApp.id)
+          );
 
         if (!saved) {
 
-          apps.pop();
-
           await sendTelegramMessage(
             chatId,
-            `❌ *فشل حفظ التطبيق*\n\n` +
-            `لم يتم تأكيد الكتابة في قاعدة البيانات.\n` +
-            `تحقق من Upstash و Environment Variables.`
+            `❌ *حدث خطأ أثناء حفظ التطبيق في قاعدة البيانات.*\n\n` +
+            `لم يتم تأكيد عملية الحفظ.`
           );
 
           return sendJson(
@@ -943,25 +948,18 @@ async function handler(req, res) {
             500,
             {
               ok: false,
-              error:
-                'Database write failed'
+              error: 'Database save verification failed'
             }
           );
         }
 
-
-        /* SUCCESS */
-
         await sendTelegramMessage(
           chatId,
-          `✨ *تمت إضافة التطبيق بنجاح!*\n\n` +
-          `📱 *الاسم:* ${newApp.name}\n` +
-          `📝 *الوصف:* ${newApp.description}\n\n` +
-          `🆔 *ID التطبيق:*\n` +
-          `\`${newApp.id}\`\n\n` +
-          `🌐 التطبيق سيظهر الآن في الموقع.`
+          `🎉 *تمت إضافة التطبيق بنجاح!*\n\n` +
+          `📱 *${newApp.name}*\n` +
+          `🆔 ID: \`${newApp.id}\`\n\n` +
+          `💾 تم حفظه في قاعدة البيانات.`
         );
-
 
         return sendJson(
           res,
@@ -973,27 +971,20 @@ async function handler(req, res) {
         );
       }
 
-
       /* ===================================================
-         /DELETEAPP
+         /deleteapp
          =================================================== */
 
       if (
-        text.startsWith(
-          '/deleteapp'
-        )
+        text.startsWith('/deleteapp')
       ) {
 
-        const identifier =
+        const idOrName =
           text
-            .replace(
-              /^\/deleteapp\s*/i,
-              ''
-            )
+            .replace(/^\/deleteapp(@\w+)?/i, '')
             .trim();
 
-
-        if (!identifier) {
+        if (!idOrName) {
 
           await sendTelegramMessage(
             chatId,
@@ -1008,21 +999,19 @@ async function handler(req, res) {
           );
         }
 
-
         const before =
           apps.length;
-
 
         apps =
           apps.filter(
             app =>
               String(app.id) !==
-                identifier &&
+              String(idOrName) &&
               String(app.name)
                 .toLowerCase() !==
-                identifier.toLowerCase()
+              String(idOrName)
+                .toLowerCase()
           );
-
 
         if (
           apps.length === before
@@ -1030,8 +1019,7 @@ async function handler(req, res) {
 
           await sendTelegramMessage(
             chatId,
-            `❌ لم يتم العثور على التطبيق.\n\n` +
-            `🆔 / الاسم: \`${identifier}\``
+            `❌ لم يتم العثور على تطبيق بهذا الـ ID أو الاسم.`
           );
 
           return sendJson(
@@ -1041,49 +1029,27 @@ async function handler(req, res) {
           );
         }
 
-
-        const saved =
-          await dbSet(
-            'apps',
-            apps
-          );
-
-
-        if (!saved) {
-
-          await sendTelegramMessage(
-            chatId,
-            `❌ حدث خطأ أثناء حفظ عملية الحذف في قاعدة البيانات.`
-          );
-
-          return sendJson(
-            res,
-            500,
-            {
-              ok: false
-            }
-          );
-        }
-
+        await dbSet(
+          'apps',
+          apps
+        );
 
         await sendTelegramMessage(
           chatId,
-          `🗑️ *تم حذف التطبيق بنجاح!*\n\n` +
-          `🆔 \`${identifier}\``
+          `🗑️ *تم حذف التطبيق بنجاح.*\n\n` +
+          `📱 المتبقي: *${apps.length}*`
         );
-
 
         return sendJson(
           res,
           200,
-          {
-            ok: true
-          }
+          { ok: true }
         );
       }
 
-
-      /* UNKNOWN COMMAND */
+      /*
+        أمر غير معروف
+      */
 
       if (
         text.startsWith('/')
@@ -1092,14 +1058,9 @@ async function handler(req, res) {
         await sendTelegramMessage(
           chatId,
           `❓ *أمر غير معروف*\n\n` +
-          `/start\n` +
-          `/addapp\n` +
-          `/deleteapp\n` +
-          `/stats\n` +
-          `/myid`
+          `استخدم /start لرؤية الأوامر.`
         );
       }
-
 
       return sendJson(
         res,
@@ -1108,83 +1069,55 @@ async function handler(req, res) {
       );
     }
 
-
     /* =====================================================
-       VISITS
+       VISIT
        ===================================================== */
 
     const isVisit =
-      (
-        method === 'GET' ||
-        method === 'POST'
-      ) &&
-      (
-        action === 'visit' ||
-        pathname.includes('visit')
-      );
-
+      action === 'visit' ||
+      pathname.endsWith('/visit');
 
     if (isVisit) {
 
-      /*
-       * INCR أفضل من GET ثم SET
-       * لأنه يقلل احتمالية فقدان الزيارات
-       * عند دخول أكثر من مستخدم بنفس الوقت.
-       */
-
-      try {
-
-        const result =
-          await upstashCommand([
-            'INCR',
-            'visits'
-          ]);
-
-        const visits =
-          Number(
-            result.result
-          ) || 0;
-
-        return sendJson(
-          res,
-          200,
-          {
-            status: 'ok',
-            visits
-          }
+      let visits =
+        await dbGet(
+          'visits',
+          0
         );
 
-      } catch (error) {
+      visits =
+        Number(visits) || 0;
 
-        console.error(
-          'Visit increment error:',
-          error.message
-        );
+      visits++;
 
-        return sendJson(
-          res,
-          500,
-          {
-            status: 'error'
-          }
-        );
-      }
+      await dbSet(
+        'visits',
+        visits
+      );
+
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          status: 'ok',
+          visits
+        }
+      );
     }
-
 
     /* =====================================================
        SITE API
        ===================================================== */
 
     const isSite =
+      action === 'site' ||
+      pathname.endsWith('/site');
+
+    if (
       method === 'GET' &&
-      (
-        action === 'site' ||
-        pathname.includes('site')
-      );
-
-
-    if (isSite) {
+      isSite
+    ) {
 
       const visits =
         Number(
@@ -1194,15 +1127,15 @@ async function handler(req, res) {
           )
         ) || 0;
 
-
-      const apps =
-        normalizeApps(
-          await dbGet(
-            'apps',
-            []
-          )
+      let apps =
+        await dbGet(
+          'apps',
+          []
         );
 
+      if (!Array.isArray(apps)) {
+        apps = [];
+      }
 
       return sendJson(
         res,
@@ -1215,9 +1148,8 @@ async function handler(req, res) {
       );
     }
 
-
     /* =====================================================
-       ROOT WEBSITE
+       DEFAULT WEBSITE
        ===================================================== */
 
     return sendHtml(
@@ -1226,11 +1158,10 @@ async function handler(req, res) {
       getHtmlPage()
     );
 
-
   } catch (error) {
 
     console.error(
-      'SERVER ERROR:',
+      'Handler Error:',
       error
     );
 
@@ -1239,13 +1170,11 @@ async function handler(req, res) {
       500,
       {
         ok: false,
-        error:
-          'Internal Server Error'
+        error: 'Internal Server Error'
       }
     );
   }
 }
-
 
 /* =========================================================
    VERCEL EXPORT
@@ -1254,14 +1183,12 @@ async function handler(req, res) {
 module.exports = handler;
 module.exports.default = handler;
 
-
 /* =========================================================
    WEBSITE
    ========================================================= */
 
 function getHtmlPage() {
-
-return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 
 <head>
@@ -1273,361 +1200,195 @@ return `<!DOCTYPE html>
   content="width=device-width, initial-scale=1.0"
 >
 
-<title>
-AHMED — مطور تطبيقات وسيرفرات
-</title>
+<title>AHMED — مطور تطبيقات وسيرفرات</title>
 
 <style>
 
 :root {
-
-  --bg:#030712;
-  --panel:rgba(11,19,38,.75);
-  --border:rgba(0,240,255,.2);
-
-  --cyan:#00f0ff;
-  --purple:#7000ff;
-
-  --text:#f0f6fc;
-  --muted:#8b949e;
-
+  --bg: #030712;
+  --panel: rgba(11, 19, 38, 0.75);
+  --border: rgba(0, 240, 255, 0.2);
+  --cyan: #00f0ff;
+  --purple: #7000ff;
+  --text: #f0f6fc;
+  --muted: #8b949e;
 }
 
 * {
-
-  box-sizing:border-box;
-  margin:0;
-  padding:0;
-
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 html {
-
-  scroll-behavior:smooth;
-
+  scroll-behavior: smooth;
 }
 
 body {
-
-  font-family:
-    'Segoe UI',
-    Tahoma,
-    sans-serif;
-
-  background-color:
-    var(--bg);
-
-  color:
-    var(--text);
-
-  min-height:100vh;
-
-  overflow-x:hidden;
-
-  position:relative;
-
+  font-family: 'Segoe UI', Tahoma, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
 }
 
 #bgCanvas {
-
-  position:fixed;
-
-  top:0;
-  left:0;
-
-  width:100%;
-  height:100%;
-
-  z-index:0;
-
-  pointer-events:none;
-
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
 }
 
 .wrapper {
-
-  position:relative;
-
-  z-index:1;
-
+  position: relative;
+  z-index: 1;
 }
 
 header {
-
-  position:fixed;
-
-  top:0;
-  left:0;
-  right:0;
-
-  height:70px;
-
-  background:
-    rgba(3,7,18,.85);
-
-  backdrop-filter:
-    blur(12px);
-
-  border-bottom:
-    1px solid var(--border);
-
-  z-index:100;
-
-  display:flex;
-
-  align-items:center;
-
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 70px;
+  background: rgba(3, 7, 18, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  z-index: 100;
+  display: flex;
+  align-items: center;
 }
 
 .nav {
-
-  width:
-    min(1100px,92%);
-
-  margin:auto;
-
-  display:flex;
-
-  justify-content:space-between;
-
-  align-items:center;
-
+  width: min(1100px, 92%);
+  margin: auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .logo {
-
-  display:flex;
-
-  align-items:center;
-
-  gap:12px;
-
-  font-weight:800;
-
-  font-size:18px;
-
-  color:var(--text);
-
-  text-decoration:none;
-
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 800;
+  font-size: 18px;
+  color: var(--text);
+  text-decoration: none;
 }
 
 .logo-icon {
-
-  width:40px;
-  height:40px;
-
-  border-radius:12px;
-
-  background:
-    linear-gradient(
-      135deg,
-      var(--cyan),
-      var(--purple)
-    );
-
-  display:grid;
-
-  place-items:center;
-
-  color:#fff;
-
-  font-size:20px;
-
-  box-shadow:
-    0 0 15px
-    rgba(0,240,255,.4);
-
-  transition:.3s;
-
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(
+    135deg,
+    var(--cyan),
+    var(--purple)
+  );
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 20px;
+  box-shadow: 0 0 15px rgba(0, 240, 255, .4);
+  transition: .3s;
 }
 
 .logo:hover .logo-icon {
-
-  transform:
-    rotate(10deg)
-    scale(1.1);
-
+  transform: rotate(10deg) scale(1.08);
 }
 
 .nav-links {
-
-  display:flex;
-
-  gap:15px;
-
-  align-items:center;
-
+  display: flex;
+  gap: 15px;
+  align-items: center;
 }
 
 .btn-nav {
-
-  padding:8px 16px;
-
-  border-radius:8px;
-
-  border:
-    1px solid var(--border);
-
-  background:
-    rgba(255,255,255,.05);
-
-  color:var(--text);
-
-  text-decoration:none;
-
-  font-size:14px;
-
-  transition:.3s;
-
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,.05);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 14px;
+  transition: .3s;
 }
 
 .btn-nav:hover {
-
-  background:
-    var(--cyan);
-
-  color:#000;
-
-  box-shadow:
-    0 0 15px
-    var(--cyan);
-
-  transform:
-    translateY(-2px);
-
+  background: var(--cyan);
+  color: #000;
+  box-shadow: 0 0 15px var(--cyan);
+  transform: translateY(-2px);
 }
 
 .hero {
-
-  padding:
-    140px 0 60px;
-
-  text-align:center;
-
-  width:
-    min(1100px,92%);
-
-  margin:auto;
-
+  padding: 140px 0 60px;
+  text-align: center;
+  width: min(1100px, 92%);
+  margin: auto;
 }
 
 .avatar-container {
-
-  position:relative;
-
-  width:110px;
-  height:110px;
-
-  margin:
-    0 auto 20px;
-
+  position: relative;
+  width: 110px;
+  height: 110px;
+  margin: 0 auto 20px;
 }
 
 .avatar {
-
-  width:100%;
-  height:100%;
-
-  border-radius:50%;
-
-  background:
-    linear-gradient(
-      135deg,
-      #0f172a,
-      #1e293b
-    );
-
-  border:
-    2px solid var(--cyan);
-
-  display:grid;
-
-  place-items:center;
-
-  font-size:36px;
-
-  font-weight:bold;
-
-  color:var(--cyan);
-
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: linear-gradient(
+    135deg,
+    #0f172a,
+    #1e293b
+  );
+  border: 2px solid var(--cyan);
+  display: grid;
+  place-items: center;
+  font-size: 36px;
+  font-weight: bold;
+  color: var(--cyan);
   box-shadow:
-    0 0 25px
-    rgba(0,240,255,.3);
-
-  animation:
-    float 4s ease-in-out infinite;
-
+    0 0 25px rgba(0,240,255,.3);
+  animation: float 4s ease-in-out infinite;
 }
 
 @keyframes float {
 
-  0%,100% {
-    transform:translateY(0);
+  0%, 100% {
+    transform: translateY(0);
   }
 
   50% {
-    transform:translateY(-10px);
+    transform: translateY(-10px);
   }
 
 }
 
 .badge {
-
-  display:inline-block;
-
-  padding:6px 14px;
-
-  border-radius:20px;
-
-  background:
-    rgba(0,240,255,.1);
-
-  border:
-    1px solid var(--cyan);
-
-  color:var(--cyan);
-
-  font-size:13px;
-
-  font-weight:600;
-
-  margin-bottom:15px;
-
-  animation:
-    pulse 2s infinite;
-
-}
-
-@keyframes pulse {
-
-  0%,100% {
-    box-shadow:
-      0 0 0
-      rgba(0,240,255,0);
-  }
-
-  50% {
-    box-shadow:
-      0 0 20px
-      rgba(0,240,255,.25);
-  }
-
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: rgba(0,240,255,.1);
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 15px;
 }
 
 h1 {
-
-  font-size:
-    clamp(32px,5vw,54px);
-
-  font-weight:900;
-
-  line-height:1.2;
-
+  font-size: clamp(32px, 5vw, 54px);
+  font-weight: 900;
+  line-height: 1.2;
 }
 
 .gradient-text {
-
   background:
     linear-gradient(
       90deg,
@@ -1635,410 +1396,215 @@ h1 {
       #3b82f6,
       var(--purple)
     );
-
-  -webkit-background-clip:text;
-
-  color:transparent;
-
+  -webkit-background-clip: text;
+  color: transparent;
 }
 
 p.subtitle {
-
-  color:var(--muted);
-
-  max-width:600px;
-
-  margin:
-    15px auto 30px;
-
-  font-size:16px;
-
+  color: var(--muted);
+  max-width: 600px;
+  margin: 15px auto 30px;
+  font-size: 16px;
 }
 
 .stats-grid {
-
-  display:flex;
-
-  justify-content:center;
-
-  gap:20px;
-
-  flex-wrap:wrap;
-
-  margin-bottom:40px;
-
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 40px;
 }
 
 .stat-card {
-
-  background:
-    var(--panel);
-
-  border:
-    1px solid var(--border);
-
-  padding:
-    15px 25px;
-
-  border-radius:12px;
-
-  backdrop-filter:
-    blur(10px);
-
-  min-width:140px;
-
-  transition:.3s;
-
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 15px 25px;
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+  min-width: 140px;
+  transition: .3s;
 }
 
 .stat-card:hover {
-
-  transform:
-    translateY(-5px);
-
-  border-color:
-    var(--cyan);
-
-  box-shadow:
-    0 10px 30px
-    rgba(0,240,255,.15);
-
+  transform: translateY(-5px);
+  border-color: var(--cyan);
+  box-shadow: 0 0 20px rgba(0,240,255,.15);
 }
 
 .stat-card h3 {
-
-  font-size:22px;
-
-  color:var(--cyan);
-
+  font-size: 22px;
+  color: var(--cyan);
 }
 
 .stat-card p {
-
-  font-size:12px;
-
-  color:var(--muted);
-
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .controls {
-
-  width:
-    min(1100px,92%);
-
-  margin:
-    0 auto 30px;
-
-  display:flex;
-
-  gap:15px;
-
-  justify-content:space-between;
-
-  flex-wrap:wrap;
-
+  width: min(1100px,92%);
+  margin: 0 auto 30px;
+  display: flex;
+  gap: 15px;
+  justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 .search-box {
-
-  flex:1;
-
-  min-width:250px;
-
+  flex: 1;
+  min-width: 250px;
+  position: relative;
 }
 
 .search-box input {
-
-  width:100%;
-
-  padding:
-    12px 20px;
-
-  border-radius:10px;
-
-  background:
-    var(--panel);
-
-  border:
-    1px solid var(--border);
-
-  color:var(--text);
-
-  outline:none;
-
-  font-size:14px;
-
-  transition:.3s;
-
+  width: 100%;
+  padding: 12px 20px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  outline: none;
+  font-size: 14px;
+  transition: .3s;
 }
 
 .search-box input:focus {
-
-  border-color:
-    var(--cyan);
-
+  border-color: var(--cyan);
   box-shadow:
-    0 0 15px
-    rgba(0,240,255,.2);
-
+    0 0 15px rgba(0,240,255,.2);
 }
 
 .grid {
-
-  width:
-    min(1100px,92%);
-
-  margin:auto;
-
-  display:grid;
-
+  width: min(1100px,92%);
+  margin: auto;
+  display: grid;
   grid-template-columns:
-    repeat(
-      auto-fill,
-      minmax(300px,1fr)
-    );
-
-  gap:20px;
-
-  padding-bottom:80px;
-
+    repeat(auto-fill,minmax(300px,1fr));
+  gap: 20px;
+  padding-bottom: 80px;
 }
 
 .app-card {
-
-  background:
-    var(--panel);
-
-  border:
-    1px solid var(--border);
-
-  border-radius:16px;
-
-  padding:22px;
-
-  backdrop-filter:
-    blur(10px);
-
-  transition:.3s ease;
-
-  display:flex;
-
-  flex-direction:column;
-
-  justify-content:space-between;
-
-  animation:
-    cardIn .5s ease both;
-
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 22px;
+  backdrop-filter: blur(10px);
+  transition: .3s ease;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  animation: cardIn .5s ease both;
 }
 
 @keyframes cardIn {
 
   from {
-
-    opacity:0;
-
-    transform:
-      translateY(20px)
-      scale(.97);
-
+    opacity: 0;
+    transform: translateY(20px);
   }
 
   to {
-
-    opacity:1;
-
-    transform:
-      translateY(0)
-      scale(1);
-
+    opacity: 1;
+    transform: translateY(0);
   }
 
 }
 
 .app-card:hover {
-
-  transform:
-    translateY(-5px);
-
-  border-color:
-    var(--cyan);
-
+  transform: translateY(-5px);
+  border-color: var(--cyan);
   box-shadow:
-    0 10px 30px
-    rgba(0,240,255,.15);
-
+    0 10px 30px rgba(0,240,255,.15);
 }
 
 .app-header {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 15px;
+}
 
-  display:flex;
-
-  align-items:center;
-
-  gap:15px;
-
-  margin-bottom:15px;
-
+.app-icon-img,
+.app-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: 12px;
 }
 
 .app-icon-img {
-
-  width:50px;
-  height:50px;
-
-  border-radius:12px;
-
-  object-fit:cover;
-
-  border:
-    1px solid var(--cyan);
-
-  box-shadow:
-    0 0 10px
-    rgba(0,240,255,.3);
-
+  object-fit: cover;
+  border: 1px solid var(--cyan);
 }
 
 .app-icon {
-
-  width:50px;
-  height:50px;
-
-  border-radius:12px;
-
   background:
     linear-gradient(
       135deg,
       rgba(0,240,255,.2),
       rgba(112,0,255,.2)
     );
-
-  border:
-    1px solid var(--cyan);
-
-  display:grid;
-
-  place-items:center;
-
-  font-size:22px;
-
-  font-weight:bold;
-
-  color:var(--cyan);
-
+  border: 1px solid var(--cyan);
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  font-weight: bold;
+  color: var(--cyan);
 }
 
 .app-title h3 {
-
-  font-size:18px;
-
-  color:var(--text);
-
+  font-size: 18px;
 }
 
 .app-desc {
-
-  color:var(--muted);
-
-  font-size:14px;
-
-  line-height:1.6;
-
-  margin-bottom:20px;
-
-  flex-grow:1;
-
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 20px;
+  flex-grow: 1;
 }
 
 .btn-download {
-
-  width:100%;
-
-  padding:12px;
-
-  border-radius:10px;
-
-  border:none;
-
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: none;
   background:
     linear-gradient(
       90deg,
       var(--cyan),
       #00b8d0
     );
-
-  color:#030712;
-
-  font-weight:bold;
-
-  font-size:14px;
-
-  cursor:pointer;
-
-  transition:.3s;
-
-  display:flex;
-
-  align-items:center;
-
-  justify-content:center;
-
-  gap:8px;
-
+  color: #030712;
+  font-weight: bold;
+  font-size: 14px;
+  cursor: pointer;
+  transition: .3s;
 }
 
 .btn-download:hover {
-
   box-shadow:
-    0 0 20px
-    var(--cyan);
-
-  transform:
-    translateY(-2px);
-
-}
-
-.btn-download:active {
-
-  transform:
-    scale(.97);
-
+    0 0 20px var(--cyan);
+  transform: translateY(-2px);
 }
 
 footer {
-
-  border-top:
-    1px solid var(--border);
-
-  padding:30px 0;
-
-  text-align:center;
-
-  color:var(--muted);
-
-  font-size:13px;
-
-  background:
-    rgba(3,7,18,.9);
-
+  border-top: 1px solid var(--border);
+  padding: 30px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  background: rgba(3,7,18,.9);
 }
 
-.loading {
+@media(max-width:600px) {
 
-  animation:
-    loadingPulse 1.5s infinite;
-
-}
-
-@keyframes loadingPulse {
-
-  0%,100% {
-    opacity:.4;
+  .hero {
+    padding-top: 120px;
   }
 
-  50% {
-    opacity:1;
+  .grid {
+    grid-template-columns: 1fr;
   }
 
 }
@@ -2063,9 +1629,7 @@ footer {
 A
 </div>
 
-<span>
-AHMED.DEV
-</span>
+<span>AHMED.DEV</span>
 
 </a>
 
@@ -2074,7 +1638,6 @@ AHMED.DEV
 <a
 href="https://t.me/kivniq"
 target="_blank"
-rel="noopener"
 class="btn-nav"
 >
 تليجرام
@@ -2085,7 +1648,6 @@ class="btn-nav"
 </div>
 
 </header>
-
 
 <section class="hero">
 
@@ -2112,7 +1674,6 @@ A
 منصة عرض التطبيقات والأدوات المدارة مباشرة بواسطة بوت التلجرام.
 </p>
 
-
 <div class="stats-grid">
 
 <div class="stat-card">
@@ -2127,7 +1688,6 @@ A
 
 </div>
 
-
 <div class="stat-card">
 
 <h3 id="appCount">
@@ -2139,7 +1699,6 @@ A
 </p>
 
 </div>
-
 
 <div class="stat-card">
 
@@ -2157,7 +1716,6 @@ A
 
 </section>
 
-
 <div class="controls">
 
 <div class="search-box">
@@ -2166,13 +1724,11 @@ A
 type="text"
 id="searchInput"
 placeholder="ابحث عن تطبيق..."
-oninput="filterApps()"
-/>
+>
 
 </div>
 
 </div>
-
 
 <main
 class="grid"
@@ -2180,7 +1736,6 @@ id="appsGrid"
 >
 
 <p
-class="loading"
 style="
 grid-column:1/-1;
 text-align:center;
@@ -2192,7 +1747,6 @@ color:var(--muted);
 
 </main>
 
-
 <footer>
 
 <p>
@@ -2203,23 +1757,15 @@ AHMED.DEV © 2026 — جميع الحقوق محفوظة
 
 </div>
 
-
 <script>
 
-/* =====================================================
-   CANVAS
-   ===================================================== */
+const canvas =
+document.getElementById('bgCanvas');
 
-var canvas =
-  document.getElementById(
-    'bgCanvas'
-  );
+const ctx =
+canvas.getContext('2d');
 
-var ctx =
-  canvas.getContext('2d');
-
-var particles = [];
-
+let particles = [];
 
 function resizeCanvas() {
 
@@ -2231,14 +1777,12 @@ function resizeCanvas() {
 
 }
 
-
 window.addEventListener(
   'resize',
   resizeCanvas
 );
 
 resizeCanvas();
-
 
 function Particle() {
 
@@ -2251,63 +1795,35 @@ function Particle() {
     canvas.height;
 
   this.size =
-    Math.random() *
-    2 + 1;
+    Math.random() * 2 + 1;
 
   this.speedX =
-    Math.random() *
-    1 - .5;
+    Math.random() * 1 - .5;
 
   this.speedY =
-    Math.random() *
-    1 - .5;
+    Math.random() * 1 - .5;
 
 }
-
 
 Particle.prototype.update =
 function() {
 
-  this.x +=
-    this.speedX;
+  this.x += this.speedX;
+  this.y += this.speedY;
 
-  this.y +=
-    this.speedY;
-
-
-  if (
-    this.x >
-    canvas.width
-  ) {
+  if (this.x > canvas.width)
     this.x = 0;
-  }
 
+  if (this.x < 0)
+    this.x = canvas.width;
 
-  if (
-    this.x < 0
-  ) {
-    this.x =
-      canvas.width;
-  }
-
-
-  if (
-    this.y >
-    canvas.height
-  ) {
+  if (this.y > canvas.height)
     this.y = 0;
-  }
 
-
-  if (
-    this.y < 0
-  ) {
-    this.y =
-      canvas.height;
-  }
+  if (this.y < 0)
+    this.y = canvas.height;
 
 };
-
 
 Particle.prototype.draw =
 function() {
@@ -2329,28 +1845,23 @@ function() {
 
 };
 
-
 function initParticles() {
 
   particles = [];
 
   for (
-    var i = 0;
+    let i = 0;
     i < 50;
     i++
   ) {
-
     particles.push(
       new Particle()
     );
-
   }
 
 }
 
-
 initParticles();
-
 
 function animate() {
 
@@ -2361,16 +1872,12 @@ function animate() {
     canvas.height
   );
 
-
   particles.forEach(
-    function(p) {
-
-      p.update();
-      p.draw();
-
+    particle => {
+      particle.update();
+      particle.draw();
     }
   );
-
 
   requestAnimationFrame(
     animate
@@ -2378,16 +1885,95 @@ function animate() {
 
 }
 
-
 animate();
 
-
 /* =====================================================
-   APP DATA
+   SITE
    ===================================================== */
 
-var allApps = [];
+let allApps = [];
 
+async function loadPortal() {
+
+  const base =
+    window.location.origin +
+    window.location.pathname;
+
+  try {
+
+    /*
+      تسجيل الزيارة
+    */
+
+    fetch(
+      base + '?action=visit',
+      {
+        method: 'POST'
+      }
+    ).catch(() => {});
+
+    /*
+      تحميل التطبيقات
+    */
+
+    const response =
+      await fetch(
+        base + '?action=site',
+        {
+          cache: 'no-store'
+        }
+      );
+
+    if (!response.ok) {
+      throw new Error(
+        'API Error'
+      );
+    }
+
+    const data =
+      await response.json();
+
+    document.getElementById(
+      'visitCount'
+    ).innerText =
+      data.visits || 0;
+
+    document.getElementById(
+      'appCount'
+    ).innerText =
+      Array.isArray(data.apps)
+        ? data.apps.length
+        : 0;
+
+    allApps =
+      Array.isArray(data.apps)
+        ? data.apps
+        : [];
+
+    renderApps(allApps);
+
+  } catch (error) {
+
+    console.error(
+      'Portal Error:',
+      error
+    );
+
+    document.getElementById(
+      'appsGrid'
+    ).innerHTML = `
+      <p style="
+        grid-column:1/-1;
+        text-align:center;
+        color:var(--muted);
+      ">
+        تعذر تحميل التطبيقات حالياً.
+      </p>
+    `;
+
+  }
+
+}
 
 /* =====================================================
    ESCAPE HTML
@@ -2396,388 +1982,214 @@ var allApps = [];
 function escapeHtml(value) {
 
   return String(
-    value == null
-      ? ''
-      : value
+    value || ''
   )
-  .replace(
-    /&/g,
-    '&amp;'
-  )
-  .replace(
-    /</g,
-    '&lt;'
-  )
-  .replace(
-    />/g,
-    '&gt;'
-  )
-  .replace(
-    /"/g,
-    '&quot;'
-  )
-  .replace(
-    /'/g,
-    '&#039;'
-  );
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#039;');
 
 }
 
-
 /* =====================================================
-   LOAD
-   ===================================================== */
-
-async function loadPortal() {
-
-  try {
-
-    var base =
-      window.location.origin +
-      window.location.pathname;
-
-
-    /* VISIT */
-
-    fetch(
-      base + '?action=visit',
-      {
-        method:'POST'
-      }
-    ).catch(
-      function(){}
-    );
-
-
-    /* SITE */
-
-    var response =
-      await fetch(
-        base + '?action=site',
-        {
-          method:'GET',
-          cache:'no-store'
-        }
-      );
-
-
-    if (
-      !response.ok
-    ) {
-
-      throw new Error(
-        'API Error'
-      );
-
-    }
-
-
-    var data =
-      await response.json();
-
-
-    if (
-      !data ||
-      data.ok === false
-    ) {
-
-      throw new Error(
-        'Invalid API response'
-      );
-
-    }
-
-
-    document
-      .getElementById(
-        'visitCount'
-      )
-      .innerText =
-        data.visits || 0;
-
-
-    document
-      .getElementById(
-        'appCount'
-      )
-      .innerText =
-        data.apps
-          ? data.apps.length
-          : 0;
-
-
-    allApps =
-      Array.isArray(
-        data.apps
-      )
-        ? data.apps
-        : [];
-
-
-    renderApps(
-      allApps
-    );
-
-
-  } catch (error) {
-
-    console.error(
-      error
-    );
-
-
-    document
-      .getElementById(
-        'appsGrid'
-      )
-      .innerHTML =
-        '<p style="' +
-        'grid-column:1/-1;' +
-        'text-align:center;' +
-        'color:var(--muted);' +
-        '">' +
-        'تعذر تحميل البيانات حالياً.' +
-        '</p>';
-
-  }
-
-}
-
-
-/* =====================================================
-   RENDER
+   APPS
    ===================================================== */
 
 function renderApps(apps) {
 
-  var grid =
+  const grid =
     document.getElementById(
       'appsGrid'
     );
-
 
   if (
     !apps ||
     apps.length === 0
   ) {
 
-    grid.innerHTML =
-      '<p style="' +
-      'grid-column:1/-1;' +
-      'text-align:center;' +
-      'color:var(--muted);' +
-      '">' +
-      'لا توجد تطبيقات متاحة حالياً.' +
-      '</p>';
+    grid.innerHTML = `
+      <p style="
+        grid-column:1/-1;
+        text-align:center;
+        color:var(--muted);
+      ">
+        لا توجد تطبيقات متاحة حالياً.
+      </p>
+    `;
 
     return;
   }
 
-
   grid.innerHTML =
-    apps
-      .map(
-        function(app) {
+    apps.map(
+      (app, index) => {
 
-          var iconHtml;
+        const name =
+          escapeHtml(
+            app.name || 'Application'
+          );
 
+        const description =
+          escapeHtml(
+            app.description || ''
+          );
+
+        const download =
+          String(
+            app.download || '#'
+          );
+
+        let iconHtml;
+
+        if (app.image) {
+
+          iconHtml = `
+            <img
+              src="${escapeHtml(app.image)}"
+              class="app-icon-img"
+              alt="app icon"
+              loading="lazy"
+            >
+          `;
+
+        } else {
+
+          iconHtml = `
+            <div class="app-icon">
+              ${escapeHtml(
+                (app.name || 'A')
+                  .charAt(0)
+                  .toUpperCase()
+              )}
+            </div>
+          `;
+
+        }
+
+        return `
+          <div
+            class="app-card"
+            style="animation-delay:${index * 60}ms"
+          >
+
+            <div>
+
+              <div class="app-header">
+
+                ${iconHtml}
+
+                <div class="app-title">
+
+                  <h3>
+                    ${name}
+                  </h3>
+
+                </div>
+
+              </div>
+
+              <p class="app-desc">
+                ${description}
+              </p>
+
+            </div>
+
+            <button
+              class="btn-download"
+              data-url="${escapeHtml(download)}"
+            >
+              تحميل التطبيق ⬇️
+            </button>
+
+          </div>
+        `;
+
+      }
+    )
+    .join('');
+
+  document
+    .querySelectorAll(
+      '.btn-download'
+    )
+    .forEach(button => {
+
+      button.addEventListener(
+        'click',
+        () => {
+
+          const url =
+            button.dataset.url;
 
           if (
-            app.image
+            url &&
+            url !== '#'
           ) {
 
-            iconHtml =
-              '<img src="' +
-              escapeHtml(
-                app.image
-              ) +
-              '" class="app-icon-img" ' +
-              'alt="app icon" ' +
-              'loading="lazy">';
-
-          } else {
-
-            iconHtml =
-              '<div class="app-icon">' +
-              escapeHtml(
-                (
-                  app.name ||
-                  'A'
-                )
-                .charAt(0)
-                .toUpperCase()
-              ) +
-              '</div>';
+            window.open(
+              url,
+              '_blank',
+              'noopener,noreferrer'
+            );
 
           }
 
-
-          var safeName =
-            escapeHtml(
-              app.name
-            );
-
-          var safeDescription =
-            escapeHtml(
-              app.description
-            );
-
-          var safeDownload =
-            escapeHtml(
-              app.download
-            );
-
-
-          return (
-
-            '<div class="app-card">' +
-
-              '<div>' +
-
-                '<div class="app-header">' +
-
-                  iconHtml +
-
-                  '<div class="app-title">' +
-
-                    '<h3>' +
-                    safeName +
-                    '</h3>' +
-
-                  '</div>' +
-
-                '</div>' +
-
-                '<p class="app-desc">' +
-                safeDescription +
-                '</p>' +
-
-              '</div>' +
-
-              '<button ' +
-              'class="btn-download" ' +
-              'data-url="' +
-              safeDownload +
-              '" ' +
-              'onclick="openDownload(this.dataset.url)">' +
-
-                '<span>' +
-                'تحميل التطبيق' +
-                '</span> ⬇️' +
-
-              '</button>' +
-
-            '</div>'
-
-          );
-
         }
-      )
-      .join('');
+      );
+
+    });
 
 }
-
-
-/* =====================================================
-   DOWNLOAD
-   ===================================================== */
-
-function openDownload(url) {
-
-  if (!url) {
-    return;
-  }
-
-  try {
-
-    var parsed =
-      new URL(url);
-
-    if (
-      parsed.protocol !== 'http:' &&
-      parsed.protocol !== 'https:'
-    ) {
-
-      return;
-
-    }
-
-    window.open(
-      parsed.href,
-      '_blank',
-      'noopener,noreferrer'
-    );
-
-  } catch (_) {
-
-    alert(
-      'رابط التحميل غير صالح'
-    );
-
-  }
-
-}
-
 
 /* =====================================================
    SEARCH
    ===================================================== */
 
-function filterApps() {
+document
+  .getElementById(
+    'searchInput'
+  )
+  .addEventListener(
+    'input',
+    function() {
 
-  var input =
-    document.getElementById(
-      'searchInput'
-    );
+      const query =
+        this.value
+          .toLowerCase()
+          .trim();
 
+      const filtered =
+        allApps.filter(
+          app => {
 
-  var query =
-    input.value
-      .toLowerCase()
-      .trim();
+            const name =
+              String(
+                app.name || ''
+              )
+              .toLowerCase();
 
+            const description =
+              String(
+                app.description || ''
+              )
+              .toLowerCase();
 
-  var filtered =
-    allApps.filter(
-      function(app) {
+            return (
+              name.includes(query) ||
+              description.includes(query)
+            );
 
-        var name =
-          String(
-            app.name || ''
-          )
-          .toLowerCase();
-
-
-        var description =
-          String(
-            app.description || ''
-          )
-          .toLowerCase();
-
-
-        return (
-          name.indexOf(
-            query
-          ) !== -1
-          ||
-          description.indexOf(
-            query
-          ) !== -1
+          }
         );
 
-      }
-    );
+      renderApps(filtered);
 
-
-  renderApps(
-    filtered
+    }
   );
 
-}
-
-
 /* =====================================================
-   START
+   LOAD
    ===================================================== */
 
 loadPortal();
@@ -2785,6 +2197,6 @@ loadPortal();
 </script>
 
 </body>
-</html>`;
 
+</html>`;
 }
