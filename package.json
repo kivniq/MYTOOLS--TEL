@@ -1,5 +1,6 @@
 {
   "name": "mytools-tel",
   "version": "1.0.0",
-  "private": true
+  "main": "api/index.js",
+  "dependencies": {}
 }
