@@ -6,136 +6,153 @@ const https = require('https');
    ENVIRONMENT VARIABLES
    ========================================================= */
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = Number(process.env.ADMIN_ID || 0);
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
+const ADMIN_ID = String(process.env.ADMIN_ID || '').trim();
 
-const UPSTASH_URL = process.env.UPSTASH_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_TOKEN;
+const UPSTASH_URL = String(
+  process.env.UPSTASH_URL || ''
+).replace(/\/+$/, '');
 
-/* =========================================================
-   ENV CHECK
-   ========================================================= */
-
-function getMissingEnv() {
-  const missing = [];
-
-  if (!BOT_TOKEN) missing.push('BOT_TOKEN');
-  if (!process.env.ADMIN_ID) missing.push('ADMIN_ID');
-  if (!UPSTASH_URL) missing.push('UPSTASH_URL');
-  if (!UPSTASH_TOKEN) missing.push('UPSTASH_TOKEN');
-
-  return missing;
-}
+const UPSTASH_TOKEN =
+  process.env.UPSTASH_TOKEN || '';
 
 /* =========================================================
-   GENERIC HTTPS REQUEST
+   BASIC CONFIG
    ========================================================= */
 
-function httpsRequest({
-  hostname,
-  path,
-  method = 'GET',
-  headers = {},
-  body = null
-}) {
+const JSON_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type'
+};
+
+/* =========================================================
+   HTTPS REQUEST
+   ========================================================= */
+
+function requestHttps(options, body) {
   return new Promise((resolve, reject) => {
-    const request = https.request(
-      {
-        hostname,
-        port: 443,
-        path,
-        method,
-        headers
-      },
-      response => {
-        let data = '';
+    const req = https.request(options, (res) => {
+      let data = '';
 
-        response.setEncoding('utf8');
+      res.setEncoding('utf8');
 
-        response.on('data', chunk => {
-          data += chunk;
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        let parsed = data;
+
+        try {
+          parsed = data ? JSON.parse(data) : null;
+        } catch (_) {}
+
+        resolve({
+          status: res.statusCode || 0,
+          data: parsed
         });
-
-        response.on('end', () => {
-          let parsed = data;
-
-          try {
-            parsed = JSON.parse(data);
-          } catch (_) {}
-
-          resolve({
-            statusCode: response.statusCode,
-            headers: response.headers,
-            data: parsed
-          });
-        });
-      }
-    );
-
-    request.setTimeout(15000, () => {
-      request.destroy(new Error('Request timeout'));
+      });
     });
 
-    request.on('error', reject);
+    req.setTimeout(15000, () => {
+      req.destroy(new Error('Request timeout'));
+    });
 
-    if (body !== null && body !== undefined) {
-      request.write(
+    req.on('error', reject);
+
+    if (body !== undefined && body !== null) {
+      req.write(
         typeof body === 'string'
           ? body
           : JSON.stringify(body)
       );
     }
 
-    request.end();
+    req.end();
   });
 }
 
 /* =========================================================
-   UPSTASH
+   ENVIRONMENT CHECK
    ========================================================= */
 
-function encodeRedisKey(key) {
-  return encodeURIComponent(String(key));
-}
+function getMissingEnv() {
+  const missing = [];
 
-async function upstashCommand(command) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) {
-    throw new Error('Upstash environment variables are missing');
+  if (!BOT_TOKEN) {
+    missing.push('BOT_TOKEN');
   }
 
-  const base = UPSTASH_URL.replace(/\/+$/, '');
+  if (!ADMIN_ID) {
+    missing.push('ADMIN_ID');
+  }
 
-  const parsed = new URL(base);
+  if (!UPSTASH_URL) {
+    missing.push('UPSTASH_URL');
+  }
 
-  const result = await httpsRequest({
-    hostname: parsed.hostname,
-    path: parsed.pathname === '/'
-      ? ''
-      : parsed.pathname,
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${UPSTASH_TOKEN}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
+  if (!UPSTASH_TOKEN) {
+    missing.push('UPSTASH_TOKEN');
+  }
+
+  return missing;
+}
+
+/* =========================================================
+   UPSTASH COMMAND
+   ========================================================= */
+
+async function upstashCommand(command) {
+  if (!UPSTASH_URL) {
+    throw new Error('UPSTASH_URL is missing');
+  }
+
+  if (!UPSTASH_TOKEN) {
+    throw new Error('UPSTASH_TOKEN is missing');
+  }
+
+  const parsed = new URL(UPSTASH_URL);
+
+  const result = await requestHttps(
+    {
+      hostname: parsed.hostname,
+      port: 443,
+      path: parsed.pathname || '/',
+      method: 'POST',
+      headers: {
+        Authorization:
+          `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type':
+          'application/json',
+        Accept:
+          'application/json'
+      }
     },
-    body: command
-  });
+    command
+  );
 
   if (
-    result.statusCode < 200 ||
-    result.statusCode >= 300
+    result.status < 200 ||
+    result.status >= 300
   ) {
     throw new Error(
-      `Upstash HTTP ${result.statusCode}: ${JSON.stringify(result.data)}`
+      `Upstash HTTP ${result.status}: ` +
+      JSON.stringify(result.data)
     );
   }
 
   if (
     !result.data ||
-    result.data.result === undefined
+    !Object.prototype.hasOwnProperty.call(
+      result.data,
+      'result'
+    )
   ) {
     throw new Error(
-      `Invalid Upstash response: ${JSON.stringify(result.data)}`
+      'Invalid Upstash response: ' +
+      JSON.stringify(result.data)
     );
   }
 
@@ -143,60 +160,15 @@ async function upstashCommand(command) {
 }
 
 /* =========================================================
-   DATABASE GET
+   DB GET
    ========================================================= */
 
 async function dbGet(key, defaultValue) {
   try {
-    let result;
-
-    /*
-      استخدام صيغة REST الخاصة بـ Upstash:
-      POST /
-      ["GET", "key"]
-    */
-
-    try {
-      result = await upstashCommand([
-        'GET',
-        String(key)
-      ]);
-    } catch (firstError) {
-      /*
-        Fallback إلى endpoint:
-        /get/key
-      */
-
-      const base = UPSTASH_URL.replace(/\/+$/, '');
-      const parsed = new URL(
-        `${base}/get/${encodeRedisKey(key)}`
-      );
-
-      const response = await httpsRequest({
-        hostname: parsed.hostname,
-        path:
-          parsed.pathname +
-          parsed.search,
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${UPSTASH_TOKEN}`,
-          Accept: 'application/json'
-        }
-      });
-
-      if (
-        response.statusCode < 200 ||
-        response.statusCode >= 300
-      ) {
-        throw firstError;
-      }
-
-      result =
-        response.data &&
-        response.data.result !== undefined
-          ? response.data.result
-          : null;
-    }
+    const result = await upstashCommand([
+      'GET',
+      String(key)
+    ]);
 
     if (
       result === null ||
@@ -218,7 +190,7 @@ async function dbGet(key, defaultValue) {
 
   } catch (error) {
     console.error(
-      'dbGet error:',
+      '[DB GET]',
       error.message
     );
 
@@ -227,130 +199,104 @@ async function dbGet(key, defaultValue) {
 }
 
 /* =========================================================
-   DATABASE SET
+   DB SET
    ========================================================= */
 
 async function dbSet(key, value) {
-  try {
-    const serialized = JSON.stringify(value);
+  const serialized =
+    JSON.stringify(value);
 
-    let result;
+  const result =
+    await upstashCommand([
+      'SET',
+      String(key),
+      serialized
+    ]);
 
-    try {
-      /*
-        Upstash command:
-        ["SET", "key", "value"]
-      */
-
-      result = await upstashCommand([
-        'SET',
-        String(key),
-        serialized
-      ]);
-
-    } catch (firstError) {
-      /*
-        Fallback إلى:
-        /set/key
-      */
-
-      const base = UPSTASH_URL.replace(/\/+$/, '');
-
-      const parsed = new URL(
-        `${base}/set/${encodeRedisKey(key)}`
-      );
-
-      const response = await httpsRequest({
-        hostname: parsed.hostname,
-        path:
-          parsed.pathname +
-          parsed.search,
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${UPSTASH_TOKEN}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        },
-        body: JSON.stringify(serialized)
-      });
-
-      if (
-        response.statusCode < 200 ||
-        response.statusCode >= 300
-      ) {
-        throw firstError;
-      }
-
-      result =
-        response.data &&
-        response.data.result !== undefined
-          ? response.data.result
-          : null;
-    }
-
-    return result;
-
-  } catch (error) {
-    console.error(
-      'dbSet error:',
-      error.message
-    );
-
-    throw error;
-  }
+  return result;
 }
 
 /* =========================================================
    TELEGRAM REQUEST
    ========================================================= */
 
-async function telegramReq(
-  path,
-  method = 'GET',
+async function telegramRequest(
+  method,
+  query = '',
   body = null
 ) {
   if (!BOT_TOKEN) {
-    throw new Error('BOT_TOKEN is missing');
+    throw new Error(
+      'BOT_TOKEN is missing'
+    );
   }
 
-  const parsed = new URL(
-    `https://api.telegram.org/bot${BOT_TOKEN}${path}`
-  );
+  const base =
+    `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-  const response = await httpsRequest({
-    hostname: parsed.hostname,
-    path:
-      parsed.pathname +
-      parsed.search,
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
+  const parsed =
+    new URL(
+      base +
+      '/' +
+      method +
+      query
+    );
+
+  return requestHttps(
+    {
+      hostname: parsed.hostname,
+      port: 443,
+      path:
+        parsed.pathname +
+        parsed.search,
+      method:
+        body ? 'POST' : 'GET',
+      headers: {
+        'Content-Type':
+          'application/json',
+        Accept:
+          'application/json'
+      }
     },
     body
-  });
-
-  return response.data;
+  );
 }
 
 /* =========================================================
-   SEND TELEGRAM MESSAGE
+   TELEGRAM SEND MESSAGE
    ========================================================= */
 
-async function sendTelegramMessage(chatId, text) {
+async function sendTelegramMessage(
+  chatId,
+  text
+) {
   try {
-    return await telegramReq(
-      '/sendMessage',
-      'POST',
-      {
-        chat_id: chatId,
-        text,
-        parse_mode: 'Markdown'
-      }
-    );
+    const result =
+      await telegramRequest(
+        'sendMessage',
+        '',
+        {
+          chat_id: chatId,
+          text: text,
+          parse_mode: 'Markdown'
+        }
+      );
+
+    if (
+      !result.data ||
+      !result.data.ok
+    ) {
+      console.error(
+        '[TELEGRAM]',
+        JSON.stringify(result.data)
+      );
+    }
+
+    return result.data;
+
   } catch (error) {
     console.error(
-      'Telegram sendMessage error:',
+      '[TELEGRAM SEND]',
       error.message
     );
 
@@ -359,31 +305,38 @@ async function sendTelegramMessage(chatId, text) {
 }
 
 /* =========================================================
-   TELEGRAM FILE
+   TELEGRAM FILE URL
    ========================================================= */
 
-async function getTelegramFileUrl(fileId) {
+async function getTelegramFileUrl(
+  fileId
+) {
   try {
-    const result = await telegramReq(
-      `/getFile?file_id=${encodeURIComponent(fileId)}`
-    );
+    const result =
+      await telegramRequest(
+        'getFile',
+        `?file_id=${encodeURIComponent(fileId)}`
+      );
+
+    const data =
+      result.data;
 
     if (
-      result &&
-      result.ok &&
-      result.result &&
-      result.result.file_path
+      data &&
+      data.ok &&
+      data.result &&
+      data.result.file_path
     ) {
       return (
         `https://api.telegram.org/file/bot` +
         `${BOT_TOKEN}/` +
-        result.result.file_path
+        data.result.file_path
       );
     }
 
   } catch (error) {
     console.error(
-      'Telegram file error:',
+      '[TELEGRAM FILE]',
       error.message
     );
   }
@@ -395,26 +348,36 @@ async function getTelegramFileUrl(fileId) {
    REQUEST BODY
    ========================================================= */
 
-async function getRequestBody(req) {
-  if (req.body !== undefined && req.body !== null) {
-
-    if (typeof req.body === 'object') {
-      return req.body;
+function readBody(req) {
+  if (
+    req.body !== undefined &&
+    req.body !== null
+  ) {
+    if (
+      typeof req.body === 'object'
+    ) {
+      return Promise.resolve(
+        req.body
+      );
     }
 
-    if (typeof req.body === 'string') {
+    if (
+      typeof req.body === 'string'
+    ) {
       try {
-        return JSON.parse(req.body);
+        return Promise.resolve(
+          JSON.parse(req.body)
+        );
       } catch (_) {
-        return {};
+        return Promise.resolve({});
       }
     }
   }
 
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     let data = '';
 
-    req.on('data', chunk => {
+    req.on('data', (chunk) => {
       data += chunk;
     });
 
@@ -425,7 +388,9 @@ async function getRequestBody(req) {
       }
 
       try {
-        resolve(JSON.parse(data));
+        resolve(
+          JSON.parse(data)
+        );
       } catch (_) {
         resolve({});
       }
@@ -438,60 +403,39 @@ async function getRequestBody(req) {
 }
 
 /* =========================================================
-   RESPONSE HELPERS
+   RESPONSE
    ========================================================= */
 
-function sendJson(res, statusCode, data) {
-  if (res.headersSent) return;
+function json(res, status, data) {
+  if (res.headersSent) {
+    return;
+  }
 
-  res.statusCode = statusCode;
+  res.statusCode = status;
 
-  res.setHeader(
-    'Content-Type',
-    'application/json; charset=utf-8'
-  );
-
-  res.setHeader(
-    'Access-Control-Allow-Origin',
-    '*'
-  );
-
-  res.setHeader(
-    'Access-Control-Allow-Methods',
-    'GET,POST,OPTIONS'
-  );
-
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type'
-  );
+  Object.keys(
+    JSON_HEADERS
+  ).forEach((key) => {
+    res.setHeader(
+      key,
+      JSON_HEADERS[key]
+    );
+  });
 
   res.end(
     JSON.stringify(data)
   );
 }
 
-function sendHtml(res, statusCode, html) {
-  if (res.headersSent) return;
-
-  res.statusCode = statusCode;
-
-  res.setHeader(
-    'Content-Type',
-    'text/html; charset=utf-8'
-  );
-
-  res.end(html);
-}
-
 /* =========================================================
-   HEALTH CHECK
+   HEALTH
    ========================================================= */
 
-async function healthCheck() {
-  const missing = getMissingEnv();
+async function health() {
+  const missing =
+    getMissingEnv();
 
-  if (missing.length > 0) {
+  if (missing.length) {
     return {
       ok: false,
       environment: false,
@@ -500,593 +444,674 @@ async function healthCheck() {
   }
 
   let telegram = false;
-  let upstash = false;
+  let database = false;
 
   try {
-    const tg = await telegramReq('/getMe');
+    const result =
+      await telegramRequest(
+        'getMe'
+      );
 
     telegram =
       !!(
-        tg &&
-        tg.ok &&
-        tg.result
+        result.data &&
+        result.data.ok
       );
-  } catch (_) {
-    telegram = false;
+
+  } catch (error) {
+    console.error(
+      '[HEALTH TELEGRAM]',
+      error.message
+    );
   }
 
   try {
-    const value = await dbGet(
+    /*
+      لا نحتاج إنشاء بيانات.
+      فقط نختبر GET.
+    */
+
+    await dbGet(
       '__health_check__',
       null
     );
 
-    /*
-      نجاح الوصول للـ Redis حتى لو المفتاح غير موجود
-    */
-    upstash = true;
+    database = true;
 
-    void value;
-  } catch (_) {
-    upstash = false;
+  } catch (error) {
+    console.error(
+      '[HEALTH DB]',
+      error.message
+    );
   }
 
   return {
-    ok: telegram && upstash,
-    environment: true,
-    telegram,
-    upstash
+    ok:
+      telegram &&
+      database,
+
+    database:
+      database
+        ? 'connected'
+        : 'error',
+
+    telegram:
+      telegram
+        ? 'configured'
+        : 'error',
+
+    admin:
+      Number(ADMIN_ID) || 0
   };
 }
 
 /* =========================================================
-   MAIN HANDLER
+   ADD APP
    ========================================================= */
 
-async function handler(req, res) {
+async function addApp(
+  msg,
+  chatId
+) {
+  const text =
+    String(
+      msg.text ||
+      msg.caption ||
+      ''
+    ).trim();
 
-  try {
+  const content =
+    text
+      .replace(
+        /^\/addapp(?:@\w+)?/i,
+        ''
+      )
+      .trim();
 
-    /*
-      CORS OPTIONS
-    */
-
-    if (
-      req.method &&
-      req.method.toUpperCase() === 'OPTIONS'
-    ) {
-      res.statusCode = 204;
-
-      res.setHeader(
-        'Access-Control-Allow-Origin',
-        '*'
+  const parts =
+    content
+      .split('|')
+      .map(
+        x => x.trim()
       );
 
-      res.setHeader(
-        'Access-Control-Allow-Methods',
-        'GET,POST,OPTIONS'
-      );
-
-      res.setHeader(
-        'Access-Control-Allow-Headers',
-        'Content-Type'
-      );
-
-      return res.end();
-    }
-
-    const missing = getMissingEnv();
-
-    const rawUrl =
-      req.url || '/';
-
-    const method =
-      String(req.method || 'GET')
-        .toUpperCase();
-
-    const url = new URL(
-      rawUrl,
-      'https://vercel.local'
+  if (
+    parts.length < 3 ||
+    !parts[0] ||
+    !parts[1] ||
+    !parts[2]
+  ) {
+    await sendTelegramMessage(
+      chatId,
+      `⚠️ *الصيغة الصحيحة:*\n\n` +
+      '`/addapp الاسم | الوصف | رابط التحميل`'
     );
 
-    const pathname =
-      url.pathname.toLowerCase();
+    return {
+      ok: true
+    };
+  }
 
-    const action =
-      String(
-        url.searchParams.get('action') || ''
-      ).toLowerCase();
+  let apps =
+    await dbGet(
+      'apps',
+      []
+    );
 
-    /* =====================================================
-       HEALTH
-       ===================================================== */
+  if (!Array.isArray(apps)) {
+    apps = [];
+  }
+
+  let image = null;
+
+  /*
+    Telegram Photo
+  */
+
+  if (
+    Array.isArray(msg.photo) &&
+    msg.photo.length
+  ) {
+    const photo =
+      msg.photo[
+        msg.photo.length - 1
+      ];
+
+    image =
+      await getTelegramFileUrl(
+        photo.file_id
+      );
+  }
+
+  /*
+    Telegram image document
+  */
+
+  else if (
+    msg.document &&
+    msg.document.file_id &&
+    String(
+      msg.document.mime_type || ''
+    ).startsWith('image/')
+  ) {
+    image =
+      await getTelegramFileUrl(
+        msg.document.file_id
+      );
+  }
+
+  const newApp = {
+    id: Date.now(),
+    name: parts[0],
+    description: parts[1],
+    download: parts[2],
+    image
+  };
+
+  apps.push(newApp);
+
+  /*
+    SAVE
+  */
+
+  await dbSet(
+    'apps',
+    apps
+  );
+
+  /*
+    VERIFY
+  */
+
+  const verify =
+    await dbGet(
+      'apps',
+      []
+    );
+
+  const saved =
+    Array.isArray(verify) &&
+    verify.some(
+      app =>
+        String(app.id) ===
+        String(newApp.id)
+    );
+
+  if (!saved) {
+    await sendTelegramMessage(
+      chatId,
+      `❌ *فشل حفظ التطبيق في قاعدة البيانات.*`
+    );
+
+    return {
+      ok: false
+    };
+  }
+
+  await sendTelegramMessage(
+    chatId,
+    `🎉 *تمت إضافة التطبيق بنجاح!*\n\n` +
+    `📱 *${newApp.name}*\n` +
+    `🆔 ID: \`${newApp.id}\`\n\n` +
+    `💾 تم حفظ التطبيق في قاعدة البيانات.`
+  );
+
+  return {
+    ok: true,
+    app: newApp
+  };
+}
+
+/* =========================================================
+   DELETE APP
+   ========================================================= */
+
+async function deleteApp(
+  chatId,
+  identifier
+) {
+  identifier =
+    String(
+      identifier || ''
+    ).trim();
+
+  if (!identifier) {
+    await sendTelegramMessage(
+      chatId,
+      `⚠️ استخدم:\n\n` +
+      '`/deleteapp ID`'
+    );
+
+    return {
+      ok: true
+    };
+  }
+
+  let apps =
+    await dbGet(
+      'apps',
+      []
+    );
+
+  if (!Array.isArray(apps)) {
+    apps = [];
+  }
+
+  const oldLength =
+    apps.length;
+
+  apps =
+    apps.filter(
+      app => {
+        const sameId =
+          String(app.id) ===
+          identifier;
+
+        const sameName =
+          String(
+            app.name || ''
+          ).toLowerCase() ===
+          identifier.toLowerCase();
+
+        return !sameId && !sameName;
+      }
+    );
+
+  if (
+    apps.length === oldLength
+  ) {
+    await sendTelegramMessage(
+      chatId,
+      `❌ لم يتم العثور على التطبيق.`
+    );
+
+    return {
+      ok: true
+    };
+  }
+
+  await dbSet(
+    'apps',
+    apps
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    `🗑️ *تم حذف التطبيق بنجاح.*\n\n` +
+    `📱 التطبيقات المتبقية: *${apps.length}*`
+  );
+
+  return {
+    ok: true
+  };
+}
+
+/* =========================================================
+   TELEGRAM WEBHOOK
+   ========================================================= */
+
+async function webhook(
+  req,
+  res
+) {
+  try {
+    const body =
+      await readBody(req);
 
     if (
-      action === 'health' ||
-      pathname.endsWith('/health')
+      !body ||
+      !body.message
+    ) {
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    const msg =
+      body.message;
+
+    const chatId =
+      msg.chat &&
+      msg.chat.id;
+
+    const userId =
+      msg.from &&
+      msg.from.id;
+
+    if (!chatId) {
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    const text =
+      String(
+        msg.text ||
+        msg.caption ||
+        ''
+      ).trim();
+
+    /* ================================================
+       MY ID
+       ================================================ */
+
+    if (
+      /^\/myid(?:@\w+)?$/i.test(text)
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        `🆔 *ID الخاص بك:*\n\`${userId}\``
+      );
+
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    /* ================================================
+       ADMIN
+       ================================================ */
+
+    if (
+      ADMIN_ID &&
+      String(userId) !==
+        String(ADMIN_ID)
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        `⛔ *غير مصرح لك.*\n\n` +
+        `🆔 ID الخاص بك:\n` +
+        `\`${userId}\``
+      );
+
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    /* ================================================
+       LOAD
+       ================================================ */
+
+    let apps =
+      await dbGet(
+        'apps',
+        []
+      );
+
+    if (!Array.isArray(apps)) {
+      apps = [];
+    }
+
+    const visits =
+      Number(
+        await dbGet(
+          'visits',
+          0
+        )
+      ) || 0;
+
+    /* ================================================
+       START
+       ================================================ */
+
+    if (
+      /^\/start(?:@\w+)?$/i.test(text)
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        `🤖 *لوحة إدارة التطبيقات*\n\n` +
+        `📱 التطبيقات: *${apps.length}*\n` +
+        `👁 الزيارات: *${visits}*\n\n` +
+        `📌 *الأوامر:*\n\n` +
+        `/addapp الاسم | الوصف | الرابط\n` +
+        `/deleteapp ID\n` +
+        `/stats\n` +
+        `/myid`
+      );
+
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    /* ================================================
+       STATS
+       ================================================ */
+
+    if (
+      /^\/stats(?:@\w+)?$/i.test(text)
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        `📊 *إحصائيات الموقع*\n\n` +
+        `👁 الزيارات: *${visits}*\n` +
+        `📱 التطبيقات: *${apps.length}*`
+      );
+
+      return json(
+        res,
+        200,
+        {
+          ok: true
+        }
+      );
+    }
+
+    /* ================================================
+       ADD APP
+       ================================================ */
+
+    if (
+      /^\/addapp(?:@\w+)?\b/i.test(text)
     ) {
       const result =
-        await healthCheck();
+        await addApp(
+          msg,
+          chatId
+        );
 
-      return sendJson(
+      return json(
         res,
         result.ok ? 200 : 500,
         result
       );
     }
 
-    /* =====================================================
-       WEBHOOK
-       ===================================================== */
+    /* ================================================
+       DELETE APP
+       ================================================ */
 
-    const isWebhook =
+    if (
+      /^\/deleteapp(?:@\w+)?\b/i.test(text)
+    ) {
+      const identifier =
+        text
+          .replace(
+            /^\/deleteapp(?:@\w+)?/i,
+            ''
+          )
+          .trim();
+
+      const result =
+        await deleteApp(
+          chatId,
+          identifier
+        );
+
+      return json(
+        res,
+        200,
+        result
+      );
+    }
+
+    /* ================================================
+       UNKNOWN COMMAND
+       ================================================ */
+
+    if (
+      text.startsWith('/')
+    ) {
+      await sendTelegramMessage(
+        chatId,
+        `❓ *أمر غير معروف.*\n\n` +
+        `استخدم /start`
+      );
+    }
+
+    return json(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+  } catch (error) {
+    console.error(
+      '[WEBHOOK ERROR]',
+      error
+    );
+
+    /*
+      مهم:
+      Telegram يحتاج 200 حتى لا يعيد
+      إرسال نفس الـ Update باستمرار.
+    */
+
+    return json(
+      res,
+      200,
+      {
+        ok: false,
+        error: 'Webhook error'
+      }
+    );
+  }
+}
+
+/* =========================================================
+   MAIN HANDLER
+   ========================================================= */
+
+async function handler(
+  req,
+  res
+) {
+  try {
+
+    const method =
+      String(
+        req.method || 'GET'
+      ).toUpperCase();
+
+    const requestUrl =
+      new URL(
+        req.url || '/',
+        'https://vercel.local'
+      );
+
+    const action =
+      String(
+        requestUrl.searchParams.get(
+          'action'
+        ) || ''
+      ).toLowerCase();
+
+    const pathname =
+      requestUrl.pathname
+        .toLowerCase();
+
+    /* ================================================
+       OPTIONS
+       ================================================ */
+
+    if (method === 'OPTIONS') {
+      res.statusCode = 204;
+
+      Object.keys(
+        JSON_HEADERS
+      ).forEach((key) => {
+        res.setHeader(
+          key,
+          JSON_HEADERS[key]
+        );
+      });
+
+      return res.end();
+    }
+
+    /* ================================================
+       HEALTH
+       ================================================ */
+
+    if (
+      action === 'health' ||
+      pathname.endsWith('/health')
+    ) {
+      const result =
+        await health();
+
+      return json(
+        res,
+        result.ok ? 200 : 500,
+        result
+      );
+    }
+
+    /* ================================================
+       WEBHOOK
+       ================================================ */
+
+    if (
       method === 'POST' &&
       (
         action === 'webhook' ||
         pathname.endsWith('/webhook')
-      );
-
-    if (isWebhook) {
-
-      if (missing.length > 0) {
-        console.error(
-          'Missing environment variables:',
-          missing
-        );
-
-        return sendJson(
-          res,
-          500,
-          {
-            ok: false,
-            error: 'Environment variables missing',
-            missing
-          }
-        );
-      }
-
-      const body =
-        await getRequestBody(req);
-
-      /*
-        Telegram Update
-      */
-
-      if (
-        !body ||
-        !body.message
-      ) {
-        return sendJson(
-          res,
-          200,
-          {
-            ok: true,
-            ignored: true
-          }
-        );
-      }
-
-      const msg =
-        body.message;
-
-      const chatId =
-        msg.chat &&
-        msg.chat.id
-          ? msg.chat.id
-          : null;
-
-      const userId =
-        msg.from &&
-        msg.from.id
-          ? msg.from.id
-          : null;
-
-      const text =
-        String(
-          msg.text ||
-          msg.caption ||
-          ''
-        ).trim();
-
-      if (!chatId) {
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /* ===================================================
-         /myid
-         =================================================== */
-
-      if (
-        text === '/myid' ||
-        text.startsWith('/myid ')
-      ) {
-
-        await sendTelegramMessage(
-          chatId,
-          `🆔 *معرف حسابك:*\n\`${userId}\``
-        );
-
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /* ===================================================
-         ADMIN CHECK
-         =================================================== */
-
-      if (
-        ADMIN_ID &&
-        Number(userId) !== ADMIN_ID
-      ) {
-
-        await sendTelegramMessage(
-          chatId,
-          `❌ *غير مصرح لك باستخدام لوحة الإدارة.*\n\n🆔 ID الخاص بك:\n\`${userId}\``
-        );
-
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /* ===================================================
-         LOAD DATABASE
-         =================================================== */
-
-      let apps =
-        await dbGet(
-          'apps',
-          []
-        );
-
-      let visits =
-        await dbGet(
-          'visits',
-          0
-        );
-
-      if (!Array.isArray(apps)) {
-        apps = [];
-      }
-
-      if (
-        typeof visits !== 'number'
-      ) {
-        visits =
-          Number(visits) || 0;
-      }
-
-      /* ===================================================
-         /start
-         =================================================== */
-
-      if (
-        text === '/start'
-      ) {
-
-        await sendTelegramMessage(
-          chatId,
-          `🤖 *لوحة إدارة التطبيقات*\n\n` +
-          `📱 التطبيقات: *${apps.length}*\n` +
-          `👁 الزيارات: *${visits}*\n\n` +
-          `الأوامر المتاحة:\n\n` +
-          `/addapp الاسم | الوصف | الرابط\n` +
-          `/deleteapp ID\n` +
-          `/stats\n` +
-          `/myid`
-        );
-
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /* ===================================================
-         /stats
-         =================================================== */
-
-      if (
-        text === '/stats'
-      ) {
-
-        await sendTelegramMessage(
-          chatId,
-          `📊 *إحصائيات الموقع*\n\n` +
-          `👁 الزيارات: *${visits}*\n` +
-          `📱 التطبيقات: *${apps.length}*`
-        );
-
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /* ===================================================
-         /addapp
-         =================================================== */
-
-      if (
-        text.startsWith('/addapp')
-      ) {
-
-        const content =
-          text
-            .replace(/^\/addapp(@\w+)?/i, '')
-            .trim();
-
-        const parts =
-          content
-            .split('|')
-            .map(
-              item => item.trim()
-            );
-
-        if (
-          parts.length < 3 ||
-          !parts[0] ||
-          !parts[1] ||
-          !parts[2]
-        ) {
-
-          await sendTelegramMessage(
-            chatId,
-            `⚠️ *الصيغة غير صحيحة*\n\n` +
-            `استخدم:\n\n` +
-            '`/addapp الاسم | الوصف | رابط التحميل`'
-          );
-
-          return sendJson(
-            res,
-            200,
-            { ok: true }
-          );
-        }
-
-        let photoUrl = null;
-
-        /*
-          صورة Telegram
-        */
-
-        if (
-          Array.isArray(msg.photo) &&
-          msg.photo.length > 0
-        ) {
-
-          const largest =
-            msg.photo[
-              msg.photo.length - 1
-            ];
-
-          photoUrl =
-            await getTelegramFileUrl(
-              largest.file_id
-            );
-        }
-
-        /*
-          صورة كـ Document
-        */
-
-        else if (
-          msg.document &&
-          msg.document.file_id &&
-          msg.document.mime_type &&
-          msg.document.mime_type
-            .startsWith('image/')
-        ) {
-
-          photoUrl =
-            await getTelegramFileUrl(
-              msg.document.file_id
-            );
-        }
-
-        const newApp = {
-          id: Date.now(),
-          name: parts[0],
-          description: parts[1],
-          download: parts[2],
-          image: photoUrl,
-          createdAt:
-            new Date().toISOString()
-        };
-
-        apps.push(newApp);
-
-        /*
-          IMPORTANT:
-          ننتظر عملية الحفظ فعليًا
-        */
-
-        await dbSet(
-          'apps',
-          apps
-        );
-
-        /*
-          تحقق بعد الحفظ
-        */
-
-        const savedApps =
-          await dbGet(
-            'apps',
-            []
-          );
-
-        const saved =
-          Array.isArray(savedApps) &&
-          savedApps.some(
-            app =>
-              String(app.id) ===
-              String(newApp.id)
-          );
-
-        if (!saved) {
-
-          await sendTelegramMessage(
-            chatId,
-            `❌ *حدث خطأ أثناء حفظ التطبيق في قاعدة البيانات.*\n\n` +
-            `لم يتم تأكيد عملية الحفظ.`
-          );
-
-          return sendJson(
-            res,
-            500,
-            {
-              ok: false,
-              error: 'Database save verification failed'
-            }
-          );
-        }
-
-        await sendTelegramMessage(
-          chatId,
-          `🎉 *تمت إضافة التطبيق بنجاح!*\n\n` +
-          `📱 *${newApp.name}*\n` +
-          `🆔 ID: \`${newApp.id}\`\n\n` +
-          `💾 تم حفظه في قاعدة البيانات.`
-        );
-
-        return sendJson(
-          res,
-          200,
-          {
-            ok: true,
-            app: newApp
-          }
-        );
-      }
-
-      /* ===================================================
-         /deleteapp
-         =================================================== */
-
-      if (
-        text.startsWith('/deleteapp')
-      ) {
-
-        const idOrName =
-          text
-            .replace(/^\/deleteapp(@\w+)?/i, '')
-            .trim();
-
-        if (!idOrName) {
-
-          await sendTelegramMessage(
-            chatId,
-            `⚠️ استخدم:\n\n` +
-            '`/deleteapp ID`'
-          );
-
-          return sendJson(
-            res,
-            200,
-            { ok: true }
-          );
-        }
-
-        const before =
-          apps.length;
-
-        apps =
-          apps.filter(
-            app =>
-              String(app.id) !==
-              String(idOrName) &&
-              String(app.name)
-                .toLowerCase() !==
-              String(idOrName)
-                .toLowerCase()
-          );
-
-        if (
-          apps.length === before
-        ) {
-
-          await sendTelegramMessage(
-            chatId,
-            `❌ لم يتم العثور على تطبيق بهذا الـ ID أو الاسم.`
-          );
-
-          return sendJson(
-            res,
-            200,
-            { ok: true }
-          );
-        }
-
-        await dbSet(
-          'apps',
-          apps
-        );
-
-        await sendTelegramMessage(
-          chatId,
-          `🗑️ *تم حذف التطبيق بنجاح.*\n\n` +
-          `📱 المتبقي: *${apps.length}*`
-        );
-
-        return sendJson(
-          res,
-          200,
-          { ok: true }
-        );
-      }
-
-      /*
-        أمر غير معروف
-      */
-
-      if (
-        text.startsWith('/')
-      ) {
-
-        await sendTelegramMessage(
-          chatId,
-          `❓ *أمر غير معروف*\n\n` +
-          `استخدم /start لرؤية الأوامر.`
-        );
-      }
-
-      return sendJson(
-        res,
-        200,
-        { ok: true }
+      )
+    ) {
+      return webhook(
+        req,
+        res
       );
     }
 
-    /* =====================================================
+    /* ================================================
        VISIT
-       ===================================================== */
+       ================================================ */
 
-    const isVisit =
+    if (
       action === 'visit' ||
-      pathname.endsWith('/visit');
-
-    if (isVisit) {
-
+      pathname.endsWith('/visit')
+    ) {
       let visits =
-        await dbGet(
-          'visits',
-          0
-        );
-
-      visits =
-        Number(visits) || 0;
+        Number(
+          await dbGet(
+            'visits',
+            0
+          )
+        ) || 0;
 
       visits++;
 
@@ -1095,30 +1120,27 @@ async function handler(req, res) {
         visits
       );
 
-      return sendJson(
+      return json(
         res,
         200,
         {
           ok: true,
-          status: 'ok',
           visits
         }
       );
     }
 
-    /* =====================================================
-       SITE API
-       ===================================================== */
-
-    const isSite =
-      action === 'site' ||
-      pathname.endsWith('/site');
+    /* ================================================
+       SITE
+       ================================================ */
 
     if (
       method === 'GET' &&
-      isSite
+      (
+        action === 'site' ||
+        pathname.endsWith('/site')
+      )
     ) {
-
       const visits =
         Number(
           await dbGet(
@@ -1137,7 +1159,7 @@ async function handler(req, res) {
         apps = [];
       }
 
-      return sendJson(
+      return json(
         res,
         200,
         {
@@ -1148,32 +1170,55 @@ async function handler(req, res) {
       );
     }
 
-    /* =====================================================
-       DEFAULT WEBSITE
-       ===================================================== */
+    /* ================================================
+       DEFAULT
+       ================================================ */
 
-    return sendHtml(
-      res,
-      200,
-      getHtmlPage()
+    return sendWebsite(
+      res
     );
 
   } catch (error) {
 
     console.error(
-      'Handler Error:',
+      '[MAIN ERROR]',
       error
     );
 
-    return sendJson(
+    return json(
       res,
       500,
       {
         ok: false,
-        error: 'Internal Server Error'
+        error:
+          'Internal Server Error'
       }
     );
   }
+}
+
+/* =========================================================
+   WEBSITE
+   ========================================================= */
+
+function sendWebsite(res) {
+  if (res.headersSent) {
+    return;
+  }
+
+  res.statusCode = 200;
+
+  res.setHeader(
+    'Content-Type',
+    'text/html; charset=utf-8'
+  );
+
+  res.setHeader(
+    'Cache-Control',
+    'no-store'
+  );
+
+  res.end(getHtmlPage());
 }
 
 /* =========================================================
@@ -1181,10 +1226,9 @@ async function handler(req, res) {
    ========================================================= */
 
 module.exports = handler;
-module.exports.default = handler;
 
 /* =========================================================
-   WEBSITE
+   HTML
    ========================================================= */
 
 function getHtmlPage() {
@@ -1206,8 +1250,8 @@ function getHtmlPage() {
 
 :root {
   --bg: #030712;
-  --panel: rgba(11, 19, 38, 0.75);
-  --border: rgba(0, 240, 255, 0.2);
+  --panel: rgba(11, 19, 38, .75);
+  --border: rgba(0, 240, 255, .2);
   --cyan: #00f0ff;
   --purple: #7000ff;
   --text: #f0f6fc;
@@ -1225,167 +1269,345 @@ html {
 }
 
 body {
-  font-family: 'Segoe UI', Tahoma, sans-serif;
-  background-color: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  overflow-x: hidden;
-  position: relative;
+  font-family:
+    'Segoe UI',
+    Tahoma,
+    sans-serif;
+
+  background:
+    var(--bg);
+
+  color:
+    var(--text);
+
+  min-height:
+    100vh;
+
+  overflow-x:
+    hidden;
+
+  position:
+    relative;
 }
 
 #bgCanvas {
-  position: fixed;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 0;
-  pointer-events: none;
+  position:
+    fixed;
+
+  inset:
+    0;
+
+  width:
+    100%;
+
+  height:
+    100%;
+
+  z-index:
+    0;
+
+  pointer-events:
+    none;
 }
 
 .wrapper {
-  position: relative;
-  z-index: 1;
+  position:
+    relative;
+
+  z-index:
+    1;
 }
 
 header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 70px;
-  background: rgba(3, 7, 18, 0.85);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
-  z-index: 100;
-  display: flex;
-  align-items: center;
+  position:
+    fixed;
+
+  top:
+    0;
+
+  left:
+    0;
+
+  right:
+    0;
+
+  height:
+    70px;
+
+  background:
+    rgba(3,7,18,.85);
+
+  backdrop-filter:
+    blur(12px);
+
+  border-bottom:
+    1px solid var(--border);
+
+  z-index:
+    100;
+
+  display:
+    flex;
+
+  align-items:
+    center;
 }
 
 .nav {
-  width: min(1100px, 92%);
-  margin: auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  width:
+    min(1100px,92%);
+
+  margin:
+    auto;
+
+  display:
+    flex;
+
+  justify-content:
+    space-between;
+
+  align-items:
+    center;
 }
 
 .logo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-weight: 800;
-  font-size: 18px;
-  color: var(--text);
-  text-decoration: none;
+  display:
+    flex;
+
+  align-items:
+    center;
+
+  gap:
+    12px;
+
+  font-weight:
+    800;
+
+  font-size:
+    18px;
+
+  color:
+    var(--text);
+
+  text-decoration:
+    none;
 }
 
 .logo-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: linear-gradient(
-    135deg,
-    var(--cyan),
-    var(--purple)
-  );
-  display: grid;
-  place-items: center;
-  color: #fff;
-  font-size: 20px;
-  box-shadow: 0 0 15px rgba(0, 240, 255, .4);
-  transition: .3s;
+  width:
+    40px;
+
+  height:
+    40px;
+
+  border-radius:
+    12px;
+
+  background:
+    linear-gradient(
+      135deg,
+      var(--cyan),
+      var(--purple)
+    );
+
+  display:
+    grid;
+
+  place-items:
+    center;
+
+  color:
+    white;
+
+  font-size:
+    20px;
+
+  box-shadow:
+    0 0 15px rgba(0,240,255,.4);
+
+  transition:
+    .3s;
 }
 
 .logo:hover .logo-icon {
-  transform: rotate(10deg) scale(1.08);
+  transform:
+    rotate(10deg)
+    scale(1.08);
 }
 
 .nav-links {
-  display: flex;
-  gap: 15px;
-  align-items: center;
+  display:
+    flex;
+
+  gap:
+    15px;
+
+  align-items:
+    center;
 }
 
 .btn-nav {
-  padding: 8px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,.05);
-  color: var(--text);
-  text-decoration: none;
-  font-size: 14px;
-  transition: .3s;
+  padding:
+    8px 16px;
+
+  border-radius:
+    8px;
+
+  border:
+    1px solid var(--border);
+
+  background:
+    rgba(255,255,255,.05);
+
+  color:
+    var(--text);
+
+  text-decoration:
+    none;
+
+  font-size:
+    14px;
+
+  transition:
+    .3s;
 }
 
 .btn-nav:hover {
-  background: var(--cyan);
-  color: #000;
-  box-shadow: 0 0 15px var(--cyan);
-  transform: translateY(-2px);
+  background:
+    var(--cyan);
+
+  color:
+    #000;
+
+  box-shadow:
+    0 0 15px var(--cyan);
+
+  transform:
+    translateY(-2px);
 }
 
 .hero {
-  padding: 140px 0 60px;
-  text-align: center;
-  width: min(1100px, 92%);
-  margin: auto;
+  padding:
+    140px 0 60px;
+
+  text-align:
+    center;
+
+  width:
+    min(1100px,92%);
+
+  margin:
+    auto;
 }
 
 .avatar-container {
-  position: relative;
-  width: 110px;
-  height: 110px;
-  margin: 0 auto 20px;
+  position:
+    relative;
+
+  width:
+    110px;
+
+  height:
+    110px;
+
+  margin:
+    0 auto 20px;
 }
 
 .avatar {
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  background: linear-gradient(
-    135deg,
-    #0f172a,
-    #1e293b
-  );
-  border: 2px solid var(--cyan);
-  display: grid;
-  place-items: center;
-  font-size: 36px;
-  font-weight: bold;
-  color: var(--cyan);
+  width:
+    100%;
+
+  height:
+    100%;
+
+  border-radius:
+    50%;
+
+  background:
+    linear-gradient(
+      135deg,
+      #0f172a,
+      #1e293b
+    );
+
+  border:
+    2px solid var(--cyan);
+
+  display:
+    grid;
+
+  place-items:
+    center;
+
+  font-size:
+    36px;
+
+  font-weight:
+    bold;
+
+  color:
+    var(--cyan);
+
   box-shadow:
     0 0 25px rgba(0,240,255,.3);
-  animation: float 4s ease-in-out infinite;
+
+  animation:
+    float 4s ease-in-out infinite;
 }
 
 @keyframes float {
 
-  0%, 100% {
-    transform: translateY(0);
+  0%,100% {
+    transform:
+      translateY(0);
   }
 
   50% {
-    transform: translateY(-10px);
+    transform:
+      translateY(-10px);
   }
 
 }
 
 .badge {
-  display: inline-block;
-  padding: 6px 14px;
-  border-radius: 20px;
-  background: rgba(0,240,255,.1);
-  border: 1px solid var(--cyan);
-  color: var(--cyan);
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 15px;
+  display:
+    inline-block;
+
+  padding:
+    6px 14px;
+
+  border-radius:
+    20px;
+
+  background:
+    rgba(0,240,255,.1);
+
+  border:
+    1px solid var(--cyan);
+
+  color:
+    var(--cyan);
+
+  font-size:
+    13px;
+
+  font-weight:
+    600;
+
+  margin-bottom:
+    15px;
 }
 
 h1 {
-  font-size: clamp(32px, 5vw, 54px);
-  font-weight: 900;
-  line-height: 1.2;
+  font-size:
+    clamp(32px,5vw,54px);
+
+  font-weight:
+    900;
+
+  line-height:
+    1.2;
 }
 
 .gradient-text {
@@ -1396,145 +1618,278 @@ h1 {
       #3b82f6,
       var(--purple)
     );
-  -webkit-background-clip: text;
-  color: transparent;
+
+  -webkit-background-clip:
+    text;
+
+  color:
+    transparent;
 }
 
-p.subtitle {
-  color: var(--muted);
-  max-width: 600px;
-  margin: 15px auto 30px;
-  font-size: 16px;
+.subtitle {
+  color:
+    var(--muted);
+
+  max-width:
+    600px;
+
+  margin:
+    15px auto 30px;
+
+  font-size:
+    16px;
 }
 
 .stats-grid {
-  display: flex;
-  justify-content: center;
-  gap: 20px;
-  flex-wrap: wrap;
-  margin-bottom: 40px;
+  display:
+    flex;
+
+  justify-content:
+    center;
+
+  gap:
+    20px;
+
+  flex-wrap:
+    wrap;
+
+  margin-bottom:
+    40px;
 }
 
 .stat-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  padding: 15px 25px;
-  border-radius: 12px;
-  backdrop-filter: blur(10px);
-  min-width: 140px;
-  transition: .3s;
+  background:
+    var(--panel);
+
+  border:
+    1px solid var(--border);
+
+  padding:
+    15px 25px;
+
+  border-radius:
+    12px;
+
+  backdrop-filter:
+    blur(10px);
+
+  min-width:
+    140px;
+
+  transition:
+    .3s;
 }
 
 .stat-card:hover {
-  transform: translateY(-5px);
-  border-color: var(--cyan);
-  box-shadow: 0 0 20px rgba(0,240,255,.15);
+  transform:
+    translateY(-5px);
+
+  border-color:
+    var(--cyan);
+
+  box-shadow:
+    0 0 20px rgba(0,240,255,.15);
 }
 
 .stat-card h3 {
-  font-size: 22px;
-  color: var(--cyan);
+  font-size:
+    22px;
+
+  color:
+    var(--cyan);
 }
 
 .stat-card p {
-  font-size: 12px;
-  color: var(--muted);
+  font-size:
+    12px;
+
+  color:
+    var(--muted);
 }
 
 .controls {
-  width: min(1100px,92%);
-  margin: 0 auto 30px;
-  display: flex;
-  gap: 15px;
-  justify-content: space-between;
-  flex-wrap: wrap;
+  width:
+    min(1100px,92%);
+
+  margin:
+    0 auto 30px;
+
+  display:
+    flex;
+
+  gap:
+    15px;
+
+  justify-content:
+    space-between;
+
+  flex-wrap:
+    wrap;
 }
 
 .search-box {
-  flex: 1;
-  min-width: 250px;
-  position: relative;
+  flex:
+    1;
+
+  min-width:
+    250px;
 }
 
 .search-box input {
-  width: 100%;
-  padding: 12px 20px;
-  border-radius: 10px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  outline: none;
-  font-size: 14px;
-  transition: .3s;
+  width:
+    100%;
+
+  padding:
+    12px 20px;
+
+  border-radius:
+    10px;
+
+  background:
+    var(--panel);
+
+  border:
+    1px solid var(--border);
+
+  color:
+    var(--text);
+
+  outline:
+    none;
+
+  font-size:
+    14px;
+
+  transition:
+    .3s;
 }
 
 .search-box input:focus {
-  border-color: var(--cyan);
+  border-color:
+    var(--cyan);
+
   box-shadow:
     0 0 15px rgba(0,240,255,.2);
 }
 
 .grid {
-  width: min(1100px,92%);
-  margin: auto;
-  display: grid;
+  width:
+    min(1100px,92%);
+
+  margin:
+    auto;
+
+  display:
+    grid;
+
   grid-template-columns:
-    repeat(auto-fill,minmax(300px,1fr));
-  gap: 20px;
-  padding-bottom: 80px;
+    repeat(
+      auto-fill,
+      minmax(300px,1fr)
+    );
+
+  gap:
+    20px;
+
+  padding-bottom:
+    80px;
 }
 
 .app-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 22px;
-  backdrop-filter: blur(10px);
-  transition: .3s ease;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  animation: cardIn .5s ease both;
+  background:
+    var(--panel);
+
+  border:
+    1px solid var(--border);
+
+  border-radius:
+    16px;
+
+  padding:
+    22px;
+
+  backdrop-filter:
+    blur(10px);
+
+  transition:
+    .3s;
+
+  display:
+    flex;
+
+  flex-direction:
+    column;
+
+  justify-content:
+    space-between;
+
+  animation:
+    cardIn .5s ease both;
 }
 
 @keyframes cardIn {
 
   from {
-    opacity: 0;
-    transform: translateY(20px);
+    opacity:
+      0;
+
+    transform:
+      translateY(20px);
   }
 
   to {
-    opacity: 1;
-    transform: translateY(0);
+    opacity:
+      1;
+
+    transform:
+      translateY(0);
   }
 
 }
 
 .app-card:hover {
-  transform: translateY(-5px);
-  border-color: var(--cyan);
+  transform:
+    translateY(-5px);
+
+  border-color:
+    var(--cyan);
+
   box-shadow:
     0 10px 30px rgba(0,240,255,.15);
 }
 
 .app-header {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  margin-bottom: 15px;
+  display:
+    flex;
+
+  align-items:
+    center;
+
+  gap:
+    15px;
+
+  margin-bottom:
+    15px;
 }
 
 .app-icon-img,
 .app-icon {
-  width: 50px;
-  height: 50px;
-  border-radius: 12px;
+  width:
+    50px;
+
+  height:
+    50px;
+
+  border-radius:
+    12px;
 }
 
 .app-icon-img {
-  object-fit: cover;
-  border: 1px solid var(--cyan);
+  object-fit:
+    cover;
+
+  border:
+    1px solid var(--cyan);
 }
 
 .app-icon {
@@ -1544,67 +1899,122 @@ p.subtitle {
       rgba(0,240,255,.2),
       rgba(112,0,255,.2)
     );
-  border: 1px solid var(--cyan);
-  display: grid;
-  place-items: center;
-  font-size: 22px;
-  font-weight: bold;
-  color: var(--cyan);
+
+  border:
+    1px solid var(--cyan);
+
+  display:
+    grid;
+
+  place-items:
+    center;
+
+  font-size:
+    22px;
+
+  font-weight:
+    bold;
+
+  color:
+    var(--cyan);
 }
 
 .app-title h3 {
-  font-size: 18px;
+  font-size:
+    18px;
 }
 
 .app-desc {
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
-  margin-bottom: 20px;
-  flex-grow: 1;
+  color:
+    var(--muted);
+
+  font-size:
+    14px;
+
+  line-height:
+    1.6;
+
+  margin-bottom:
+    20px;
+
+  flex-grow:
+    1;
 }
 
 .btn-download {
-  width: 100%;
-  padding: 12px;
-  border-radius: 10px;
-  border: none;
+  width:
+    100%;
+
+  padding:
+    12px;
+
+  border-radius:
+    10px;
+
+  border:
+    none;
+
   background:
     linear-gradient(
       90deg,
       var(--cyan),
       #00b8d0
     );
-  color: #030712;
-  font-weight: bold;
-  font-size: 14px;
-  cursor: pointer;
-  transition: .3s;
+
+  color:
+    #030712;
+
+  font-weight:
+    bold;
+
+  font-size:
+    14px;
+
+  cursor:
+    pointer;
+
+  transition:
+    .3s;
 }
 
 .btn-download:hover {
   box-shadow:
     0 0 20px var(--cyan);
-  transform: translateY(-2px);
+
+  transform:
+    translateY(-2px);
 }
 
 footer {
-  border-top: 1px solid var(--border);
-  padding: 30px 0;
-  text-align: center;
-  color: var(--muted);
-  font-size: 13px;
-  background: rgba(3,7,18,.9);
+  border-top:
+    1px solid var(--border);
+
+  padding:
+    30px 0;
+
+  text-align:
+    center;
+
+  color:
+    var(--muted);
+
+  font-size:
+    13px;
+
+  background:
+    rgba(3,7,18,.9);
 }
 
 @media(max-width:600px) {
 
   .hero {
-    padding-top: 120px;
+    padding-top:
+      120px;
   }
 
   .grid {
-    grid-template-columns: 1fr;
+    grid-template-columns:
+      1fr;
   }
 
 }
@@ -1629,7 +2039,9 @@ footer {
 A
 </div>
 
-<span>AHMED.DEV</span>
+<span>
+AHMED.DEV
+</span>
 
 </a>
 
@@ -1638,6 +2050,7 @@ A
 <a
 href="https://t.me/kivniq"
 target="_blank"
+rel="noopener noreferrer"
 class="btn-nav"
 >
 تليجرام
@@ -1724,6 +2137,7 @@ A
 type="text"
 id="searchInput"
 placeholder="ابحث عن تطبيق..."
+autocomplete="off"
 >
 
 </div>
@@ -1760,7 +2174,9 @@ AHMED.DEV © 2026 — جميع الحقوق محفوظة
 <script>
 
 const canvas =
-document.getElementById('bgCanvas');
+document.getElementById(
+  'bgCanvas'
+);
 
 const ctx =
 canvas.getContext('2d');
@@ -1774,7 +2190,6 @@ function resizeCanvas() {
 
   canvas.height =
     window.innerHeight;
-
 }
 
 window.addEventListener(
@@ -1798,31 +2213,48 @@ function Particle() {
     Math.random() * 2 + 1;
 
   this.speedX =
-    Math.random() * 1 - .5;
+    Math.random() - .5;
 
   this.speedY =
-    Math.random() * 1 - .5;
-
+    Math.random() - .5;
 }
 
 Particle.prototype.update =
 function() {
 
-  this.x += this.speedX;
-  this.y += this.speedY;
+  this.x +=
+    this.speedX;
 
-  if (this.x > canvas.width)
+  this.y +=
+    this.speedY;
+
+  if (
+    this.x >
+    canvas.width
+  ) {
     this.x = 0;
+  }
 
-  if (this.x < 0)
-    this.x = canvas.width;
+  if (
+    this.x < 0
+  ) {
+    this.x =
+      canvas.width;
+  }
 
-  if (this.y > canvas.height)
+  if (
+    this.y >
+    canvas.height
+  ) {
     this.y = 0;
+  }
 
-  if (this.y < 0)
-    this.y = canvas.height;
-
+  if (
+    this.y < 0
+  ) {
+    this.y =
+      canvas.height;
+  }
 };
 
 Particle.prototype.draw =
@@ -1842,7 +2274,6 @@ function() {
   );
 
   ctx.fill();
-
 };
 
 function initParticles() {
@@ -1858,7 +2289,6 @@ function initParticles() {
       new Particle()
     );
   }
-
 }
 
 initParticles();
@@ -1874,21 +2304,22 @@ function animate() {
 
   particles.forEach(
     particle => {
+
       particle.update();
       particle.draw();
+
     }
   );
 
   requestAnimationFrame(
     animate
   );
-
 }
 
 animate();
 
 /* =====================================================
-   SITE
+   SITE API
    ===================================================== */
 
 let allApps = [];
@@ -1902,60 +2333,71 @@ async function loadPortal() {
   try {
 
     /*
-      تسجيل الزيارة
+      زيادة الزيارة
     */
 
     fetch(
-      base + '?action=visit',
+      base +
+      '?action=visit',
       {
-        method: 'POST'
+        method: 'POST',
+        keepalive: true
       }
     ).catch(() => {});
 
     /*
-      تحميل التطبيقات
+      تحميل البيانات
     */
 
     const response =
       await fetch(
-        base + '?action=site',
+        base +
+        '?action=site',
         {
+          method: 'GET',
           cache: 'no-store'
         }
       );
 
     if (!response.ok) {
       throw new Error(
-        'API Error'
+        'API HTTP ' +
+        response.status
       );
     }
 
     const data =
       await response.json();
 
-    document.getElementById(
-      'visitCount'
-    ).innerText =
-      data.visits || 0;
+    if (!data.ok) {
+      throw new Error(
+        'API returned error'
+      );
+    }
 
     document.getElementById(
-      'appCount'
-    ).innerText =
-      Array.isArray(data.apps)
-        ? data.apps.length
-        : 0;
+      'visitCount'
+    ).textContent =
+      Number(data.visits || 0);
 
     allApps =
       Array.isArray(data.apps)
         ? data.apps
         : [];
 
-    renderApps(allApps);
+    document.getElementById(
+      'appCount'
+    ).textContent =
+      allApps.length;
+
+    renderApps(
+      allApps
+    );
 
   } catch (error) {
 
     console.error(
-      'Portal Error:',
+      '[SITE]',
       error
     );
 
@@ -1970,33 +2412,47 @@ async function loadPortal() {
         تعذر تحميل التطبيقات حالياً.
       </p>
     `;
-
   }
-
 }
 
 /* =====================================================
-   ESCAPE HTML
+   ESCAPE
    ===================================================== */
 
 function escapeHtml(value) {
 
   return String(
-    value || ''
+    value ?? ''
   )
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
-  .replace(/'/g, '&#039;');
-
+    .replace(
+      /&/g,
+      '&amp;'
+    )
+    .replace(
+      /</g,
+      '&lt;'
+    )
+    .replace(
+      />/g,
+      '&gt;'
+    )
+    .replace(
+      /"/g,
+      '&quot;'
+    )
+    .replace(
+      /'/g,
+      '&#039;'
+    );
 }
 
 /* =====================================================
-   APPS
+   RENDER
    ===================================================== */
 
-function renderApps(apps) {
+function renderApps(
+  apps
+) {
 
   const grid =
     document.getElementById(
@@ -2004,7 +2460,7 @@ function renderApps(apps) {
     );
 
   if (
-    !apps ||
+    !Array.isArray(apps) ||
     apps.length === 0
   ) {
 
@@ -2027,57 +2483,66 @@ function renderApps(apps) {
 
         const name =
           escapeHtml(
-            app.name || 'Application'
+            app.name ||
+            'Application'
           );
 
         const description =
           escapeHtml(
-            app.description || ''
+            app.description ||
+            ''
           );
+
+        const image =
+          app.image
+            ? escapeHtml(
+                app.image
+              )
+            : '';
 
         const download =
-          String(
-            app.download || '#'
+          escapeHtml(
+            app.download ||
+            '#'
           );
 
-        let iconHtml;
-
-        if (app.image) {
-
-          iconHtml = `
-            <img
-              src="${escapeHtml(app.image)}"
-              class="app-icon-img"
-              alt="app icon"
-              loading="lazy"
-            >
-          `;
-
-        } else {
-
-          iconHtml = `
-            <div class="app-icon">
-              ${escapeHtml(
-                (app.name || 'A')
-                  .charAt(0)
-                  .toUpperCase()
-              )}
-            </div>
-          `;
-
-        }
+        const icon =
+          image
+            ? `
+              <img
+                src="${image}"
+                class="app-icon-img"
+                alt="app icon"
+                loading="lazy"
+              >
+            `
+            : `
+              <div class="app-icon">
+                ${escapeHtml(
+                  (
+                    app.name ||
+                    'A'
+                  )
+                    .charAt(0)
+                    .toUpperCase()
+                )}
+              </div>
+            `;
 
         return `
           <div
             class="app-card"
-            style="animation-delay:${index * 60}ms"
+            style="
+              animation-delay:
+              ${index * 60}ms
+            "
           >
 
             <div>
 
               <div class="app-header">
 
-                ${iconHtml}
+                ${icon}
 
                 <div class="app-title">
 
@@ -2097,14 +2562,13 @@ function renderApps(apps) {
 
             <button
               class="btn-download"
-              data-url="${escapeHtml(download)}"
+              data-url="${download}"
             >
               تحميل التطبيق ⬇️
             </button>
 
           </div>
         `;
-
       }
     )
     .join('');
@@ -2113,33 +2577,32 @@ function renderApps(apps) {
     .querySelectorAll(
       '.btn-download'
     )
-    .forEach(button => {
+    .forEach(
+      button => {
 
-      button.addEventListener(
-        'click',
-        () => {
+        button.addEventListener(
+          'click',
+          () => {
 
-          const url =
-            button.dataset.url;
+            const url =
+              button.dataset.url;
 
-          if (
-            url &&
-            url !== '#'
-          ) {
+            if (
+              !url ||
+              url === '#'
+            ) {
+              return;
+            }
 
             window.open(
               url,
               '_blank',
               'noopener,noreferrer'
             );
-
           }
-
-        }
-      );
-
-    });
-
+        );
+      }
+    );
 }
 
 /* =====================================================
@@ -2179,17 +2642,17 @@ document
               name.includes(query) ||
               description.includes(query)
             );
-
           }
         );
 
-      renderApps(filtered);
-
+      renderApps(
+        filtered
+      );
     }
   );
 
 /* =====================================================
-   LOAD
+   START
    ===================================================== */
 
 loadPortal();
