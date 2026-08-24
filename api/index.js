@@ -1,262 +1,1398 @@
+'use strict';
+
 const https = require('https');
-const http = require('http');
 
-const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
-const ADMIN_ID = 1249312602;
+/*
+|--------------------------------------------------------------------------
+| CONFIG
+|--------------------------------------------------------------------------
+| ضع القيم في Vercel Environment Variables
+|
+| BOT_TOKEN
+| ADMIN_ID
+| UPSTASH_REDIS_REST_URL
+| UPSTASH_REDIS_REST_TOKEN
+|--------------------------------------------------------------------------
+*/
 
-const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
-const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
+const BOT_TOKEN = process.env.BOT_TOKEN || '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
+const ADMIN_ID = String(process.env.ADMIN_ID || '1249312602');
 
-function upstashReq(path, method = 'GET', body = null) {
-  return new Promise((resolve) => {
+const UPSTASH_URL = (
+  process.env.UPSTASH_REDIS_REST_URL ||
+  'https://inspired-trout-98698.upstash.io'
+).replace(/\/+$/, '');
+
+const UPSTASH_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN || 'gQAAAAAAAYGKAAIgcDI0ZTQ4ODE4N2Q2YWE0YzI5YWI4OTg5ZWRhZWQ2NzEwMw';
+
+/*
+|--------------------------------------------------------------------------
+| UPSTASH REST
+|--------------------------------------------------------------------------
+*/
+
+function upstashCommand(command) {
+  return new Promise((resolve, reject) => {
+
+    if (!UPSTASH_URL) {
+      return reject(
+        new Error('UPSTASH_REDIS_REST_URL is missing')
+      );
+    }
+
+    if (!UPSTASH_TOKEN) {
+      return reject(
+        new Error('UPSTASH_REDIS_REST_TOKEN is missing')
+      );
+    }
+
+    let parsedUrl;
+
     try {
-      const parsedUrl = new URL(UPSTASH_URL + path);
-      const reqOptions = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: method,
-        headers: {
-          'Authorization': `Bearer ${UPSTASH_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      };
+      parsedUrl = new URL(UPSTASH_URL);
+    } catch (error) {
+      return reject(
+        new Error('Invalid Upstash REST URL')
+      );
+    }
 
-      const req = https.request(reqOptions, (res) => {
+    const payload = JSON.stringify(command);
+
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: 443,
+      path: parsedUrl.pathname || '/',
+      method: 'POST',
+
+      headers: {
+        'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      },
+
+      timeout: 15000
+    };
+
+    const request = https.request(
+      options,
+      response => {
+
         let data = '';
-        res.on('data', chunk => { data += chunk; });
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            resolve(null);
+
+        response.setEncoding('utf8');
+
+        response.on(
+          'data',
+          chunk => {
+            data += chunk;
           }
-        });
-      });
+        );
 
-      req.on('error', () => resolve(null));
+        response.on(
+          'end',
+          () => {
 
-      if (body) {
-        const payload = typeof body === 'string' ? body : JSON.stringify(body);
-        req.write(payload);
+            let parsed;
+
+            try {
+              parsed = JSON.parse(data);
+            } catch (error) {
+              return reject(
+                new Error(
+                  `Invalid Upstash response (${response.statusCode}): ${data}`
+                )
+              );
+            }
+
+            if (
+              response.statusCode < 200 ||
+              response.statusCode >= 300
+            ) {
+              return reject(
+                new Error(
+                  `Upstash HTTP ${response.statusCode}: ${data}`
+                )
+              );
+            }
+
+            if (
+              parsed &&
+              parsed.error
+            ) {
+              return reject(
+                new Error(
+                  `Upstash Redis error: ${parsed.error}`
+                )
+              );
+            }
+
+            resolve(parsed);
+          }
+        );
       }
-      req.end();
-    } catch (e) {
-      resolve(null);
-    }
+    );
+
+    request.on(
+      'timeout',
+      () => {
+        request.destroy(
+          new Error('Upstash request timeout')
+        );
+      }
+    );
+
+    request.on(
+      'error',
+      error => {
+        reject(error);
+      }
+    );
+
+    request.write(payload);
+    request.end();
   });
 }
 
-function telegramReq(path, method = 'GET', body = null) {
-  return new Promise((resolve) => {
-    try {
-      const parsedUrl = new URL(`https://api.telegram.org/bot${BOT_TOKEN}` + path);
-      const reqOptions = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: method,
-        headers: { 'Content-Type': 'application/json' }
-      };
+/*
+|--------------------------------------------------------------------------
+| DB GET
+|--------------------------------------------------------------------------
+*/
 
-      const req = https.request(reqOptions, (res) => {
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
-        res.on('end', () => {
-          try { resolve(JSON.parse(data)); } catch (e) { resolve(null); }
-        });
-      });
+async function dbGet(key, defaultValue = null) {
 
-      req.on('error', () => resolve(null));
-
-      if (body) {
-        req.write(JSON.stringify(body));
-      }
-      req.end();
-    } catch (e) {
-      resolve(null);
-    }
-  });
-}
-
-async function dbGet(key, defaultValue) {
   try {
-    const res = await upstashReq(`/get/${key}`);
-    if (res && res.result !== undefined && res.result !== null) {
-      let val = res.result;
-      if (typeof val === 'string') {
-        try { return JSON.parse(val); } catch (e) { return val; }
-      }
-      return val;
+
+    const response =
+      await upstashCommand([
+        'GET',
+        key
+      ]);
+
+    if (
+      !response ||
+      response.result === null ||
+      response.result === undefined
+    ) {
+      return defaultValue;
     }
-    return defaultValue;
-  } catch (e) {
+
+    const value = response.result;
+
+    if (typeof value !== 'string') {
+      return value;
+    }
+
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+
+  } catch (error) {
+
+    console.error(
+      `[DB GET] ${key}:`,
+      error.message
+    );
+
     return defaultValue;
   }
 }
+
+/*
+|--------------------------------------------------------------------------
+| DB SET
+|--------------------------------------------------------------------------
+|
+| مهم:
+| هذه الدالة لا تخفي الخطأ.
+| إذا فشل الحفظ، سيتم إرجاع Error للـ caller.
+|
+|--------------------------------------------------------------------------
+*/
 
 async function dbSet(key, value) {
+
+  const valueString =
+    typeof value === 'string'
+      ? value
+      : JSON.stringify(value);
+
   try {
-    const valStr = JSON.stringify(value);
-    await upstashReq(`/set/${key}`, 'POST', valStr);
-  } catch (e) {
-    console.error('DB Set Error:', e);
+
+    const response =
+      await upstashCommand([
+        'SET',
+        key,
+        valueString
+      ]);
+
+    if (
+      !response ||
+      response.result !== 'OK'
+    ) {
+      throw new Error(
+        `Unexpected SET response: ${JSON.stringify(response)}`
+      );
+    }
+
+    return true;
+
+  } catch (error) {
+
+    console.error(
+      `[DB SET] ${key}:`,
+      error.message
+    );
+
+    throw error;
   }
 }
 
-async function sendTelegramMessage(chatId, text) {
-  await telegramReq('/sendMessage', 'POST', {
-    chat_id: chatId,
-    text: text,
-    parse_mode: 'Markdown'
+/*
+|--------------------------------------------------------------------------
+| DB INCR
+|--------------------------------------------------------------------------
+*/
+
+async function dbIncr(key) {
+
+  try {
+
+    const response =
+      await upstashCommand([
+        'INCR',
+        key
+      ]);
+
+    return Number(
+      response.result || 0
+    );
+
+  } catch (error) {
+
+    console.error(
+      `[DB INCR] ${key}:`,
+      error.message
+    );
+
+    throw error;
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| TELEGRAM REQUEST
+|--------------------------------------------------------------------------
+*/
+
+function telegramReq(
+  path,
+  method = 'GET',
+  body = null
+) {
+
+  return new Promise((resolve, reject) => {
+
+    if (!BOT_TOKEN) {
+      return reject(
+        new Error('BOT_TOKEN is missing')
+      );
+    }
+
+    let parsedUrl;
+
+    try {
+
+      parsedUrl =
+        new URL(
+          `https://api.telegram.org/bot${BOT_TOKEN}${path}`
+        );
+
+    } catch (error) {
+
+      return reject(error);
+
+    }
+
+    let payload = null;
+
+    if (body !== null) {
+      payload = JSON.stringify(body);
+    }
+
+    const headers = {
+      'Content-Type':
+        'application/json'
+    };
+
+    if (payload) {
+      headers['Content-Length'] =
+        Buffer.byteLength(payload);
+    }
+
+    const options = {
+
+      hostname:
+        parsedUrl.hostname,
+
+      port: 443,
+
+      path:
+        parsedUrl.pathname +
+        parsedUrl.search,
+
+      method,
+
+      headers,
+
+      timeout: 15000
+
+    };
+
+    const request =
+      https.request(
+        options,
+        response => {
+
+          let data = '';
+
+          response.setEncoding(
+            'utf8'
+          );
+
+          response.on(
+            'data',
+            chunk => {
+              data += chunk;
+            }
+          );
+
+          response.on(
+            'end',
+            () => {
+
+              let result;
+
+              try {
+                result =
+                  JSON.parse(data);
+              } catch {
+                return reject(
+                  new Error(
+                    `Invalid Telegram response: ${data}`
+                  )
+                );
+              }
+
+              if (
+                !result.ok
+              ) {
+                return reject(
+                  new Error(
+                    result.description ||
+                    'Telegram API error'
+                  )
+                );
+              }
+
+              resolve(result);
+            }
+          );
+
+        }
+      );
+
+    request.on(
+      'timeout',
+      () => {
+        request.destroy(
+          new Error(
+            'Telegram request timeout'
+          )
+        );
+      }
+    );
+
+    request.on(
+      'error',
+      error => {
+        reject(error);
+      }
+    );
+
+    if (payload) {
+      request.write(payload);
+    }
+
+    request.end();
   });
 }
 
-async function getTelegramFileUrl(fileId) {
-  try {
-    const res = await telegramReq(`/getFile?file_id=${fileId}`);
-    if (res && res.ok && res.result && res.result.file_path) {
-      return `https://api.telegram.org/file/bot${BOT_TOKEN}/${res.result.file_path}`;
+/*
+|--------------------------------------------------------------------------
+| TELEGRAM MESSAGE
+|--------------------------------------------------------------------------
+*/
+
+async function sendTelegramMessage(
+  chatId,
+  text
+) {
+
+  return telegramReq(
+    '/sendMessage',
+    'POST',
+    {
+      chat_id: chatId,
+      text,
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true
     }
-  } catch (e) {}
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| TELEGRAM FILE URL
+|--------------------------------------------------------------------------
+*/
+
+async function getTelegramFileUrl(
+  fileId
+) {
+
+  if (!fileId) {
+    return null;
+  }
+
+  try {
+
+    const response =
+      await telegramReq(
+        `/getFile?file_id=${encodeURIComponent(fileId)}`
+      );
+
+    if (
+      response &&
+      response.ok &&
+      response.result &&
+      response.result.file_path
+    ) {
+
+      return (
+        `https://api.telegram.org/file/bot${BOT_TOKEN}/` +
+        response.result.file_path
+      );
+
+    }
+
+  } catch (error) {
+
+    console.error(
+      'Telegram getFile error:',
+      error.message
+    );
+
+  }
+
   return null;
 }
 
-function sendJson(res, statusCode, data) {
-  if (res.headersSent) return;
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.end(JSON.stringify(data));
+/*
+|--------------------------------------------------------------------------
+| RESPONSE HELPERS
+|--------------------------------------------------------------------------
+*/
+
+function setCommonHeaders(res) {
+
+  if (res.headersSent) {
+    return;
+  }
+
+  res.setHeader(
+    'Access-Control-Allow-Origin',
+    '*'
+  );
+
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET,POST,OPTIONS'
+  );
+
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type'
+  );
+
+  res.setHeader(
+    'Cache-Control',
+    'no-store, no-cache, must-revalidate, proxy-revalidate'
+  );
+
+  res.setHeader(
+    'Pragma',
+    'no-cache'
+  );
+
+  res.setHeader(
+    'Expires',
+    '0'
+  );
 }
 
-function sendHtml(res, statusCode, html) {
-  if (res.headersSent) return;
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+function sendJson(
+  res,
+  statusCode,
+  data
+) {
+
+  if (res.headersSent) {
+    return;
+  }
+
+  setCommonHeaders(res);
+
+  res.statusCode =
+    statusCode;
+
+  res.setHeader(
+    'Content-Type',
+    'application/json; charset=utf-8'
+  );
+
+  res.end(
+    JSON.stringify(data)
+  );
+}
+
+function sendHtml(
+  res,
+  statusCode,
+  html
+) {
+
+  if (res.headersSent) {
+    return;
+  }
+
+  setCommonHeaders(res);
+
+  res.statusCode =
+    statusCode;
+
+  res.setHeader(
+    'Content-Type',
+    'text/html; charset=utf-8'
+  );
+
   res.end(html);
 }
 
+/*
+|--------------------------------------------------------------------------
+| REQUEST BODY
+|--------------------------------------------------------------------------
+*/
+
 async function getRequestBody(req) {
-  if (req.body) {
-    if (typeof req.body === 'object') return req.body;
-    if (typeof req.body === 'string') {
-      try { return JSON.parse(req.body); } catch (e) { return {}; }
+
+  if (
+    req.body !== undefined &&
+    req.body !== null
+  ) {
+
+    if (
+      typeof req.body ===
+      'object'
+    ) {
+      return req.body;
     }
+
+    if (
+      typeof req.body ===
+      'string'
+    ) {
+
+      try {
+        return JSON.parse(
+          req.body
+        );
+      } catch {
+        return {};
+      }
+
+    }
+
   }
-  return new Promise((resolve) => {
-    let bodyData = '';
-    req.on('data', chunk => { bodyData += chunk; });
-    req.on('end', () => {
-      try { resolve(JSON.parse(bodyData)); } catch (e) { resolve({}); }
-    });
-    req.on('error', () => resolve({}));
-  });
+
+  return new Promise(
+    resolve => {
+
+      let bodyData = '';
+
+      req.on(
+        'data',
+        chunk => {
+          bodyData += chunk;
+        }
+      );
+
+      req.on(
+        'end',
+        () => {
+
+          if (!bodyData) {
+            return resolve({});
+          }
+
+          try {
+
+            resolve(
+              JSON.parse(
+                bodyData
+              )
+            );
+
+          } catch {
+
+            resolve({});
+
+          }
+
+        }
+      );
+
+      req.on(
+        'error',
+        () => resolve({})
+      );
+
+    }
+  );
 }
 
-async function handler(req, res) {
-  try {
-    const rawUrl = (req && req.url) ? req.url : '/';
-    const method = (req && req.method) ? req.method.toUpperCase() : 'GET';
-    const pathname = rawUrl.split('?')[0].toLowerCase();
+/*
+|--------------------------------------------------------------------------
+| GET PARAMETER
+|--------------------------------------------------------------------------
+*/
 
-    let action = '';
-    if (req && req.query && typeof req.query === 'object' && req.query.action) {
-      action = String(req.query.action);
-    } else {
-      const match = rawUrl.match(/[?&]action=([^&]+)/);
-      if (match) action = decodeURIComponent(match[1]);
+function getAction(
+  req
+) {
+
+  if (
+    req.query &&
+    typeof req.query === 'object' &&
+    req.query.action
+  ) {
+
+    return String(
+      req.query.action
+    ).toLowerCase();
+
+  }
+
+  const rawUrl =
+    req.url || '';
+
+  try {
+
+    const parsed =
+      new URL(
+        rawUrl,
+        'https://localhost'
+      );
+
+    return (
+      parsed.searchParams
+        .get('action') ||
+      ''
+    ).toLowerCase();
+
+  } catch {
+
+    return '';
+
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| ADD APP
+|--------------------------------------------------------------------------
+*/
+
+async function addApp(
+  msg,
+  chatId,
+  text
+) {
+
+  const content =
+    text
+      .replace(
+        /^\/addapp(?:@\w+)?/i,
+        ''
+      )
+      .trim();
+
+  const parts =
+    content
+      .split('|')
+      .map(
+        s => s.trim()
+      );
+
+  if (
+    parts.length < 3 ||
+    !parts[0] ||
+    !parts[1] ||
+    !parts[2]
+  ) {
+
+    await sendTelegramMessage(
+      chatId,
+      '⚠️ *التنسيق الصحيح:*\n\n' +
+      '`/addapp الاسم | الوصف | رابط التحميل`'
+    );
+
+    return;
+  }
+
+  let photoUrl = null;
+
+  /*
+   * Telegram photo
+   */
+
+  if (
+    Array.isArray(msg.photo) &&
+    msg.photo.length > 0
+  ) {
+
+    const largestPhoto =
+      msg.photo[
+        msg.photo.length - 1
+      ];
+
+    photoUrl =
+      await getTelegramFileUrl(
+        largestPhoto.file_id
+      );
+  }
+
+  /*
+   * Telegram image document
+   */
+
+  else if (
+    msg.document &&
+    msg.document.mime_type &&
+    msg.document.mime_type
+      .startsWith('image/')
+  ) {
+
+    photoUrl =
+      await getTelegramFileUrl(
+        msg.document.file_id
+      );
+
+  }
+
+  const apps =
+    await dbGet(
+      'apps',
+      []
+    );
+
+  if (!Array.isArray(apps)) {
+    throw new Error(
+      'قاعدة البيانات تحتوي على apps غير صالح'
+    );
+  }
+
+  const newApp = {
+
+    id: Date.now(),
+
+    name: parts[0],
+
+    description:
+      parts[1],
+
+    download:
+      parts.slice(2).join('|'),
+
+    image:
+      photoUrl,
+
+    createdAt:
+      new Date().toISOString(),
+
+    updatedAt:
+      new Date().toISOString()
+
+  };
+
+  apps.push(
+    newApp
+  );
+
+  /*
+   * إذا فشل SET هنا
+   * لن نرسل رسالة النجاح.
+   */
+
+  await dbSet(
+    'apps',
+    apps
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    `✅ *تمت إضافة التطبيق بنجاح!*\n📱 *${newApp.name}*`
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| DELETE APP
+|--------------------------------------------------------------------------
+*/
+
+async function deleteApp(
+  chatId,
+  text
+) {
+
+  const idStr =
+    text
+      .replace(
+        /^\/deleteapp(?:@\w+)?/i,
+        ''
+      )
+      .trim();
+
+  if (!idStr) {
+
+    await sendTelegramMessage(
+      chatId,
+      '⚠️ استخدم:\n`/deleteapp ID`'
+    );
+
+    return;
+  }
+
+  let apps =
+    await dbGet(
+      'apps',
+      []
+    );
+
+  if (!Array.isArray(apps)) {
+    apps = [];
+  }
+
+  const oldLength =
+    apps.length;
+
+  apps =
+    apps.filter(
+      app =>
+        String(app.id) !==
+          String(idStr) &&
+        String(app.name) !==
+          String(idStr)
+    );
+
+  if (
+    apps.length ===
+    oldLength
+  ) {
+
+    await sendTelegramMessage(
+      chatId,
+      '❌ لم يتم العثور على التطبيق.'
+    );
+
+    return;
+  }
+
+  await dbSet(
+    'apps',
+    apps
+  );
+
+  await sendTelegramMessage(
+    chatId,
+    '✅ تم الحذف بنجاح.'
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| TELEGRAM WEBHOOK
+|--------------------------------------------------------------------------
+*/
+
+async function handleWebhook(
+  req,
+  res
+) {
+
+  const body =
+    await getRequestBody(req);
+
+  if (
+    !body ||
+    !body.message
+  ) {
+
+    return sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+  }
+
+  const msg =
+    body.message;
+
+  const text =
+    String(
+      msg.text ||
+      msg.caption ||
+      ''
+    ).trim();
+
+  const chatId =
+    msg.chat
+      ? msg.chat.id
+      : null;
+
+  const userId =
+    msg.from
+      ? String(msg.from.id)
+      : '';
+
+  if (!chatId) {
+
+    return sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+  }
+
+  /*
+   * /myid is allowed before admin check
+   */
+
+  if (
+    /^\/myid(?:@\w+)?$/i
+      .test(text)
+  ) {
+
+    await sendTelegramMessage(
+      chatId,
+      `🆔 الـ ID الخاص بك هو: \`${userId}\``
+    );
+
+    return sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+  }
+
+  /*
+   * ADMIN CHECK
+   */
+
+  if (
+    ADMIN_ID &&
+    userId !== ADMIN_ID
+  ) {
+
+    await sendTelegramMessage(
+      chatId,
+      `❌ غير مصرح لك.\nالـ ID الخاص بك هو: \`${userId}\``
+    );
+
+    return sendJson(
+      res,
+      200,
+      {
+        ok: true
+      }
+    );
+
+  }
+
+  /*
+   * ADD
+   */
+
+  if (
+    /^\/addapp(?:@\w+)?\b/i
+      .test(text)
+  ) {
+
+    await addApp(
+      msg,
+      chatId,
+      text
+    );
+
+  }
+
+  /*
+   * DELETE
+   */
+
+  else if (
+    /^\/deleteapp(?:@\w+)?\b/i
+      .test(text)
+  ) {
+
+    await deleteApp(
+      chatId,
+      text
+    );
+
+  }
+
+  /*
+   * STATS
+   */
+
+  else if (
+    /^\/stats(?:@\w+)?$/i
+      .test(text) ||
+    /^\/start(?:@\w+)?$/i
+      .test(text)
+  ) {
+
+    const visits =
+      await dbGet(
+        'visits',
+        0
+      );
+
+    const apps =
+      await dbGet(
+        'apps',
+        []
+      );
+
+    await sendTelegramMessage(
+      chatId,
+      `📊 *الإحصائيات:*\n👁 الزيارات: ${visits}\n📱 التطبيقات: ${
+        Array.isArray(apps)
+          ? apps.length
+          : 0
+      }`
+    );
+
+  }
+
+  /*
+   * Unknown command
+   */
+
+  return sendJson(
+    res,
+    200,
+    {
+      ok: true
+    }
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| MAIN HANDLER
+|--------------------------------------------------------------------------
+*/
+
+async function handler(
+  req,
+  res
+) {
+
+  try {
+
+    setCommonHeaders(res);
+
+    /*
+     * OPTIONS
+     */
+
+    if (
+      req.method ===
+      'OPTIONS'
+    ) {
+
+      res.statusCode =
+        204;
+
+      res.end();
+
+      return;
+
     }
 
-    const isWebhook = method === 'POST' && (action === 'webhook' || pathname.includes('webhook'));
-    const isVisit = (method === 'POST' || method === 'GET') && (action === 'visit' || pathname.includes('visit'));
-    const isSite = method === 'GET' && (action === 'site' || pathname.includes('site'));
+    const method =
+      String(
+        req.method ||
+        'GET'
+      ).toUpperCase();
+
+    const action =
+      getAction(req);
+
+    const rawUrl =
+      req.url || '/';
+
+    /*
+     * WEBHOOK
+     *
+     * Supports:
+     *
+     * /api?action=webhook
+     *
+     * /api/webhook
+     */
+
+    const pathname =
+      rawUrl
+        .split('?')[0]
+        .toLowerCase();
+
+    const isWebhook =
+      method === 'POST' &&
+      (
+        action === 'webhook' ||
+        pathname.includes(
+          '/webhook'
+        )
+      );
 
     if (isWebhook) {
-      const body = await getRequestBody(req);
-      if (body && body.message) {
-        const msg = body.message;
-        const text = (msg.text || msg.caption || '').trim();
-        const chatId = msg.chat ? msg.chat.id : 0;
-        const userId = msg.from ? msg.from.id : 0;
 
-        if (text === '/myid') {
-          await sendTelegramMessage(chatId, `🆔 الـ ID الخاص بك هو: \`${userId}\``);
-          return sendJson(res, 200, { ok: true });
+      return await handleWebhook(
+        req,
+        res
+      );
+
+    }
+
+    /*
+     * VISITS
+     */
+
+    const isVisit =
+      action === 'visit' ||
+      pathname.includes(
+        '/visit'
+      );
+
+    if (
+      isVisit &&
+      (
+        method === 'GET' ||
+        method === 'POST'
+      )
+    ) {
+
+      const visits =
+        await dbIncr(
+          'visits'
+        );
+
+      return sendJson(
+        res,
+        200,
+        {
+          status: 'ok',
+          visits
         }
+      );
 
-        if (ADMIN_ID && userId !== ADMIN_ID) {
-          await sendTelegramMessage(chatId, `❌ غير مصرح لك. الـ ID الخاص بك هو: \`${userId}\``);
-          return sendJson(res, 200, { ok: true });
+    }
+
+    /*
+     * SITE
+     */
+
+    const isSite =
+      action === 'site' ||
+      pathname.includes(
+        '/site'
+      );
+
+    if (
+      isSite &&
+      method === 'GET'
+    ) {
+
+      const [
+        visits,
+        apps
+      ] = await Promise.all([
+        dbGet(
+          'visits',
+          0
+        ),
+        dbGet(
+          'apps',
+          []
+        )
+      ]);
+
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          visits:
+            Number(visits || 0),
+          apps:
+            Array.isArray(apps)
+              ? apps
+              : []
         }
+      );
 
-        let apps = await dbGet('apps', []);
-        let visits = await dbGet('visits', 0);
+    }
 
-        if (text.startsWith('/addapp')) {
-          const content = text.replace('/addapp', '').trim();
-          const parts = content.split('|').map(s => s.trim());
+    /*
+     * HEALTH
+     */
 
-          if (parts.length >= 3) {
-            let photoUrl = null;
-            if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
-              const largestPhoto = msg.photo[msg.photo.length - 1];
-              photoUrl = await getTelegramFileUrl(largestPhoto.file_id);
-            } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith('image/')) {
-              photoUrl = await getTelegramFileUrl(msg.document.file_id);
-            }
+    if (
+      action === 'health'
+    ) {
 
-            const newApp = {
-              id: Date.now(),
-              name: parts[0],
-              description: parts[1],
-              download: parts[2],
-              image: photoUrl
-            };
+      let database =
+        false;
 
-            apps.push(newApp);
-            await dbSet('apps', apps);
-            await sendTelegramMessage(chatId, `✅ *تمت إضافة التطبيق بنجاح!*\n📱 *${newApp.name}*`);
-          } else {
-            await sendTelegramMessage(chatId, "⚠️ التنسيق الصحيح:\n`/addapp الاسم | الوصف | رابط التحميل`");
-          }
-        } else if (text === '/stats' || text === '/start') {
-          await sendTelegramMessage(chatId, `📊 *الإحصائيات:*\n👁 الزيارات: ${visits}\n📱 التطبيقات: ${apps.length}`);
-        } else if (text.startsWith('/deleteapp')) {
-          const idStr = text.replace('/deleteapp', '').trim();
-          apps = apps.filter(a => a.id.toString() !== idStr && a.name !== idStr);
-          await dbSet('apps', apps);
-          await sendTelegramMessage(chatId, "✅ تم الحذف بنجاح.");
-        }
+      try {
+
+        await upstashCommand([
+          'PING'
+        ]);
+
+        database =
+          true;
+
+      } catch (error) {
+
+        console.error(
+          'Health DB error:',
+          error.message
+        );
+
       }
-      return sendJson(res, 200, { ok: true });
+
+      return sendJson(
+        res,
+        database
+          ? 200
+          : 500,
+        {
+          ok: database,
+          database,
+          telegram:
+            Boolean(
+              BOT_TOKEN
+            ),
+          timestamp:
+            new Date().toISOString()
+        }
+      );
+
     }
 
-    if (isVisit) {
-      let visits = await dbGet('visits', 0);
-      visits++;
-      await dbSet('visits', visits);
-      return sendJson(res, 200, { status: 'ok', visits });
+    /*
+     * ROOT WEBSITE
+     */
+
+    if (
+      method === 'GET'
+    ) {
+
+      return sendHtml(
+        res,
+        200,
+        getHtmlPage()
+      );
+
     }
 
-    if (isSite) {
-      const visits = await dbGet('visits', 0);
-      const apps = await dbGet('apps', []);
-      return sendJson(res, 200, { visits, apps });
-    }
+    return sendJson(
+      res,
+      405,
+      {
+        ok: false,
+        error:
+          'Method Not Allowed'
+      }
+    );
 
-    return sendHtml(res, 200, getHtmlPage());
   } catch (err) {
-    console.error('Server Handler Error:', err);
-    return sendJson(res, 500, { error: 'Internal Server Error' });
+
+    console.error(
+      'Server Handler Error:',
+      err
+    );
+
+    return sendJson(
+      res,
+      500,
+      {
+        ok: false,
+        error:
+          err.message ||
+          'Internal Server Error'
+      }
+    );
+
   }
+
 }
 
-module.exports = handler;
-module.exports.default = handler;
+module.exports =
+  handler;
+
+module.exports.default =
+  handler;
+
+/*
+|--------------------------------------------------------------------------
+| FRONTEND
+|--------------------------------------------------------------------------
+| التصميم الأصلي بدون تغيير
+|--------------------------------------------------------------------------
+*/
 
 function getHtmlPage() {
-  return `<!DOCTYPE html>
+
+return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
@@ -377,53 +1513,237 @@ var allApps = [];
 
 async function loadPortal() {
   try {
-    var loc = window.location.origin + window.location.pathname;
-    fetch(loc + '?action=visit', { method: 'POST' }).catch(function(){});
-    var res = await fetch(loc + '?action=site');
-    if (!res.ok) throw new Error('API Error');
-    var data = await res.json();
-    document.getElementById('visitCount').innerText = data.visits || 0;
-    document.getElementById('appCount').innerText = data.apps ? data.apps.length : 0;
-    allApps = data.apps || [];
-    renderApps(allApps);
-  } catch (e) { 
-    console.error(e); 
-    document.getElementById('appsGrid').innerHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+
+    var loc =
+      window.location.origin +
+      window.location.pathname;
+
+    /*
+     * زيادة الزيارة.
+     *
+     * لا ننتظرها حتى لا نؤخر تحميل التطبيقات.
+     */
+
+    fetch(
+      loc + '?action=visit&_=' + Date.now(),
+      {
+        method: 'POST',
+        cache: 'no-store'
+      }
+    ).catch(function(){});
+
+    var res =
+      await fetch(
+        loc + '?action=site&_=' + Date.now(),
+        {
+          method: 'GET',
+          cache: 'no-store'
+        }
+      );
+
+    if (!res.ok) {
+      throw new Error(
+        'API Error: ' + res.status
+      );
+    }
+
+    var data =
+      await res.json();
+
+    if (
+      data.ok === false
+    ) {
+      throw new Error(
+        data.error ||
+        'API returned an error'
+      );
+    }
+
+    document.getElementById(
+      'visitCount'
+    ).innerText =
+      data.visits || 0;
+
+    document.getElementById(
+      'appCount'
+    ).innerText =
+      data.apps
+        ? data.apps.length
+        : 0;
+
+    allApps =
+      Array.isArray(data.apps)
+        ? data.apps
+        : [];
+
+    renderApps(
+      allApps
+    );
+
+  } catch (e) {
+
+    console.error(e);
+
+    document.getElementById(
+      'appsGrid'
+    ).innerHTML =
+      '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+
   }
+}
+
+function escapeHtml(value) {
+
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
 }
 
 function renderApps(apps) {
-  var grid = document.getElementById('appsGrid');
-  if (!apps || apps.length === 0) {
-    grid.innerHTML = '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+
+  var grid =
+    document.getElementById(
+      'appsGrid'
+    );
+
+  if (
+    !apps ||
+    apps.length === 0
+  ) {
+
+    grid.innerHTML =
+      '<p style="grid-column: 1/-1; text-align: center; color: var(--muted);">لا توجد تطبيقات متاحة حالياً.</p>';
+
     return;
   }
-  grid.innerHTML = apps.map(function(app) {
-    var iconHtml = app.image 
-      ? '<img src="' + app.image + '" class="app-icon-img" alt="app icon">' 
-      : '<div class="app-icon">' + ((app.name || 'A').charAt(0).toUpperCase()) + '</div>';
-    
-    return '<div class="app-card">' +
-      '<div>' +
-        '<div class="app-header">' + iconHtml + '<div class="app-title"><h3>' + app.name + '</h3></div></div>' +
-        '<p class="app-desc">' + app.description + '</p>' +
-      '</div>' +
-      '<button class="btn-download" onclick="window.open(\'' + app.download + '\', \'_blank\')">' +
-        '<span>تحميل التطبيق</span> ⬇️' +
-      '</button>' +
-    '</div>';
-  }).join('');
+
+  grid.innerHTML =
+    apps.map(
+      function(app) {
+
+        var name =
+          escapeHtml(
+            app.name
+          );
+
+        var description =
+          escapeHtml(
+            app.description
+          );
+
+        var download =
+          escapeHtml(
+            app.download
+          );
+
+        var iconHtml =
+          app.image
+            ? '<img src="' +
+              escapeHtml(app.image) +
+              '" class="app-icon-img" alt="app icon" onerror="this.style.display=\\'none\\'">'
+            : '<div class="app-icon">' +
+              (
+                (app.name || 'A')
+                  .charAt(0)
+                  .toUpperCase()
+              ) +
+              '</div>';
+
+        return '<div class="app-card">' +
+
+          '<div>' +
+
+            '<div class="app-header">' +
+
+              iconHtml +
+
+              '<div class="app-title">' +
+                '<h3>' +
+                  name +
+                '</h3>' +
+              '</div>' +
+
+            '</div>' +
+
+            '<p class="app-desc">' +
+              description +
+            '</p>' +
+
+          '</div>' +
+
+          '<button class="btn-download" ' +
+          'onclick="openDownload(this.dataset.url)" ' +
+          'data-url="' +
+          download +
+          '">' +
+
+            '<span>تحميل التطبيق</span> ⬇️' +
+
+          '</button>' +
+
+        '</div>';
+
+      }
+    ).join('');
+
+}
+
+function openDownload(url) {
+
+  if (!url) {
+    return;
+  }
+
+  window.open(
+    url,
+    '_blank',
+    'noopener,noreferrer'
+  );
+
 }
 
 function filterApps() {
-  var query = document.getElementById('searchInput').value.toLowerCase();
-  var filtered = allApps.filter(function(a) {
-    return a.name.toLowerCase().indexOf(query) !== -1 || a.description.toLowerCase().indexOf(query) !== -1;
-  });
-  renderApps(filtered);
+
+  var query =
+    document.getElementById(
+      'searchInput'
+    ).value
+      .toLowerCase();
+
+  var filtered =
+    allApps.filter(
+      function(a) {
+
+        var name =
+          String(
+            a.name || ''
+          ).toLowerCase();
+
+        var description =
+          String(
+            a.description || ''
+          ).toLowerCase();
+
+        return (
+          name.indexOf(query) !== -1 ||
+          description.indexOf(query) !== -1
+        );
+
+      }
+    );
+
+  renderApps(
+    filtered
+  );
+
 }
 
 loadPortal();
+
 </script>
 </body>
 </html>`;
