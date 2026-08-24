@@ -4,10 +4,9 @@ const http = require('http');
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = 1249312602;
 
-const UPSTASH_URL = 'https://inspired-trout-98698.upstash.io';
-const UPSTASH_TOKEN = 'gQAAAAAAAYGKAAIgcDI0ZTQ4ODE4N2Q2YWE0YzI5YWI4OTg5ZWRhZWQ2NzEwMw';
+const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
+const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
 
-// طلبات شبكة آمنة متوافقة مع كل إصدارات Node.js
 function makeRequest(urlStr, options = {}, bodyData = null) {
   return new Promise((resolve) => {
     try {
@@ -54,16 +53,11 @@ function makeRequest(urlStr, options = {}, bodyData = null) {
 
 async function httpFetch(url, options = {}) {
   if (typeof fetch === 'function') {
-    try {
-      return await fetch(url, options);
-    } catch (e) {
-      // التراجع إلى الموديول النيتف في حال فشل fetch
-    }
+    try { return await fetch(url, options); } catch (e) {}
   }
   return makeRequest(url, options, options.body);
 }
 
-// التعامل مع قواعد البيانات Upstash Redis
 async function dbGet(key, defaultValue) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return defaultValue;
   try {
@@ -129,12 +123,12 @@ async function getTelegramFileUrl(fileId) {
   return null;
 }
 
-// إرسال استجابات آمنة بدون الاعتماد على دواء Vercel الخاصة
 function sendJson(res, statusCode, data) {
   try {
     if (res.headersSent) return;
     res.statusCode = statusCode;
     res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.end(JSON.stringify(data));
   } catch (e) {
     console.error('sendJson Error:', e);
@@ -169,7 +163,6 @@ async function getRequestBody(req) {
   });
 }
 
-// السيرفر الرئيسي
 async function handler(req, res) {
   try {
     const rawUrl = (req && req.url) ? req.url : '/';
@@ -188,7 +181,6 @@ async function handler(req, res) {
     const isVisit = (method === 'POST' || method === 'GET') && (action === 'visit' || pathname.includes('visit'));
     const isSite = method === 'GET' && (action === 'site' || pathname.includes('site'));
 
-    // 1. Webhook Route
     if (isWebhook) {
       const body = await getRequestBody(req);
       if (body && body.message) {
@@ -249,7 +241,6 @@ async function handler(req, res) {
       return sendJson(res, 200, { ok: true });
     }
 
-    // 2. Visit Route
     if (isVisit) {
       let visits = await dbGet('visits', 0);
       visits++;
@@ -257,14 +248,12 @@ async function handler(req, res) {
       return sendJson(res, 200, { status: 'ok', visits });
     }
 
-    // 3. Site Data Route
     if (isSite) {
       const visits = await dbGet('visits', 0);
       const apps = await dbGet('apps', []);
       return sendJson(res, 200, { visits, apps });
     }
 
-    // 4. Default: Render HTML Page
     return sendHtml(res, 200, getHtmlPage());
   } catch (err) {
     console.error('Server Handler Error:', err);
@@ -397,8 +386,9 @@ var allApps = [];
 
 async function loadPortal() {
   try {
-    fetch('/?action=visit', { method: 'POST' }).catch(function(){});
-    var res = await fetch('/?action=site');
+    var loc = window.location.origin + window.location.pathname;
+    fetch(loc + '?action=visit', { method: 'POST' }).catch(function(){});
+    var res = await fetch(loc + '?action=site');
     if (!res.ok) throw new Error('API Error');
     var data = await res.json();
     document.getElementById('visitCount').innerText = data.visits || 0;
