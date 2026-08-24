@@ -1,20 +1,83 @@
+const https = require('https');
+const http = require('http');
+
 const BOT_TOKEN = '1874969562:AAHH8VZA6B_SqmlN54pWLx4iy27UIndgsB0';
 const ADMIN_ID = 1249312602;
 
 const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
 const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
 
-// Upstash GET
+// طلبات شبكة آمنة متوافقة مع كل إصدارات Node.js
+function makeRequest(urlStr, options = {}, bodyData = null) {
+  return new Promise((resolve) => {
+    try {
+      const parsedUrl = new URL(urlStr);
+      const reqOptions = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: options.method || 'GET',
+        headers: options.headers || {}
+      };
+
+      const lib = parsedUrl.protocol === 'https:' ? https : http;
+      const req = lib.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            text: async () => data,
+            json: async () => {
+              try { return JSON.parse(data); } catch (e) { return null; }
+            }
+          });
+        });
+      });
+
+      req.on('error', () => {
+        resolve({ ok: false, status: 500, text: async () => '', json: async () => null });
+      });
+
+      if (bodyData) {
+        const payload = typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData);
+        req.setHeader('Content-Length', Buffer.byteLength(payload));
+        req.write(payload);
+      }
+      req.end();
+    } catch (e) {
+      resolve({ ok: false, status: 500, text: async () => '', json: async () => null });
+    }
+  });
+}
+
+async function httpFetch(url, options = {}) {
+  if (typeof fetch === 'function') {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      // التراجع إلى الموديول النيتف في حال فشل fetch
+    }
+  }
+  return makeRequest(url, options, options.body);
+}
+
+// التعامل مع قواعد البيانات Upstash Redis
 async function dbGet(key, defaultValue) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return defaultValue;
   try {
-    const res = await fetch(`${UPSTASH_URL}/get/${key}`, {
+    const res = await httpFetch(`${UPSTASH_URL}/get/${key}`, {
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
     });
-    if (!res.ok) return defaultValue;
+    if (!res || !res.ok) return defaultValue;
     const data = await res.json();
     if (data && data.result !== null && data.result !== undefined) {
-      return typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
+      let val = data.result;
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch (e) { return val; }
+      }
+      return val;
     }
     return defaultValue;
   } catch (e) {
@@ -22,13 +85,17 @@ async function dbGet(key, defaultValue) {
   }
 }
 
-// Upstash SET
 async function dbSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
   try {
-    const encodedValue = encodeURIComponent(JSON.stringify(value));
-    await fetch(`${UPSTASH_URL}/set/${key}/${encodedValue}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
+    const valStr = JSON.stringify(value);
+    await httpFetch(`${UPSTASH_URL}/set/${key}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: valStr
     });
   } catch (e) {
     console.error('DB Set Error:', e);
@@ -37,7 +104,7 @@ async function dbSet(key, value) {
 
 async function sendTelegramMessage(chatId, text) {
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    await httpFetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'Markdown' })
@@ -49,10 +116,12 @@ async function sendTelegramMessage(chatId, text) {
 
 async function getTelegramFileUrl(fileId) {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-    const data = await res.json();
-    if (data && data.ok && data.result && data.result.file_path) {
-      return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
+    const res = await httpFetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+    if (res && res.ok) {
+      const data = await res.json();
+      if (data && data.ok && data.result && data.result.file_path) {
+        return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
+      }
     }
   } catch (e) {
     console.error('File fetch error:', e);
@@ -60,39 +129,82 @@ async function getTelegramFileUrl(fileId) {
   return null;
 }
 
-module.exports = async (req, res) => {
+// إرسال استجابات آمنة بدون الاعتماد على دواء Vercel الخاصة
+function sendJson(res, statusCode, data) {
   try {
-    const host = req.headers.host || 'localhost';
-    const urlObj = new URL(req.url || '/', `http://${host}`);
-    const action = urlObj.searchParams.get('action') || '';
-    const pathname = urlObj.pathname.toLowerCase();
+    if (res.headersSent) return;
+    res.statusCode = statusCode;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(data));
+  } catch (e) {
+    console.error('sendJson Error:', e);
+  }
+}
 
-    const isWebhook = req.method === 'POST' && (pathname.includes('webhook') || action === 'webhook');
-    const isVisit = req.method === 'POST' && (pathname.includes('visit') || action === 'visit');
-    const isSite = req.method === 'GET' && (pathname.includes('site') || action === 'site');
+function sendHtml(res, statusCode, html) {
+  try {
+    if (res.headersSent) return;
+    res.statusCode = statusCode;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(html);
+  } catch (e) {
+    console.error('sendHtml Error:', e);
+  }
+}
 
-    // 1. Webhook
+async function getRequestBody(req) {
+  if (req.body) {
+    if (typeof req.body === 'object') return req.body;
+    if (typeof req.body === 'string') {
+      try { return JSON.parse(req.body); } catch (e) { return {}; }
+    }
+  }
+  return new Promise((resolve) => {
+    let bodyData = '';
+    req.on('data', chunk => { bodyData += chunk; });
+    req.on('end', () => {
+      try { resolve(JSON.parse(bodyData)); } catch (e) { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+// السيرفر الرئيسي
+async function handler(req, res) {
+  try {
+    const rawUrl = (req && req.url) ? req.url : '/';
+    const method = (req && req.method) ? req.method.toUpperCase() : 'GET';
+    const pathname = rawUrl.split('?')[0].toLowerCase();
+
+    let action = '';
+    if (req && req.query && typeof req.query === 'object' && req.query.action) {
+      action = String(req.query.action);
+    } else {
+      const match = rawUrl.match(/[?&]action=([^&]+)/);
+      if (match) action = decodeURIComponent(match[1]);
+    }
+
+    const isWebhook = method === 'POST' && (action === 'webhook' || pathname.includes('webhook'));
+    const isVisit = (method === 'POST' || method === 'GET') && (action === 'visit' || pathname.includes('visit'));
+    const isSite = method === 'GET' && (action === 'site' || pathname.includes('site'));
+
+    // 1. Webhook Route
     if (isWebhook) {
-      let body = req.body;
-      if (typeof body === 'string') {
-        try { body = JSON.parse(body); } catch (e) { body = {}; }
-      }
-      body = body || {};
-
-      if (body.message) {
+      const body = await getRequestBody(req);
+      if (body && body.message) {
         const msg = body.message;
-        const text = msg.text || msg.caption || '';
+        const text = (msg.text || msg.caption || '').trim();
         const chatId = msg.chat ? msg.chat.id : 0;
         const userId = msg.from ? msg.from.id : 0;
 
         if (text === '/myid') {
           await sendTelegramMessage(chatId, `🆔 الـ ID الخاص بك هو: \`${userId}\``);
-          return res.status(200).json({ ok: true });
+          return sendJson(res, 200, { ok: true });
         }
 
         if (ADMIN_ID && userId !== ADMIN_ID) {
           await sendTelegramMessage(chatId, `❌ غير مصرح لك. الـ ID الخاص بك هو: \`${userId}\``);
-          return res.status(200).json({ ok: true });
+          return sendJson(res, 200, { ok: true });
         }
 
         let apps = await dbGet('apps', []);
@@ -104,7 +216,7 @@ module.exports = async (req, res) => {
 
           if (parts.length >= 3) {
             let photoUrl = null;
-            if (msg.photo && msg.photo.length > 0) {
+            if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
               const largestPhoto = msg.photo[msg.photo.length - 1];
               photoUrl = await getTelegramFileUrl(largestPhoto.file_id);
             } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith('image/')) {
@@ -121,46 +233,47 @@ module.exports = async (req, res) => {
 
             apps.push(newApp);
             await dbSet('apps', apps);
-            await sendTelegramMessage(chatId, `✅ *تمت إضافة التطبيق بنجاح وحفظه بالداتابيز!*${photoUrl ? ' 🖼' : ''}\n📱 *${newApp.name}*`);
+            await sendTelegramMessage(chatId, `✅ *تمت إضافة التطبيق بنجاح!*\n📱 *${newApp.name}*`);
           } else {
             await sendTelegramMessage(chatId, "⚠️ التنسيق الصحيح:\n`/addapp الاسم | الوصف | رابط التحميل`");
           }
         } else if (text === '/stats' || text === '/start') {
           await sendTelegramMessage(chatId, `📊 *الإحصائيات:*\n👁 الزيارات: ${visits}\n📱 التطبيقات: ${apps.length}`);
         } else if (text.startsWith('/deleteapp')) {
-          const id = text.replace('/deleteapp', '').trim();
-          apps = apps.filter(a => a.id.toString() !== id && a.name !== id);
+          const idStr = text.replace('/deleteapp', '').trim();
+          apps = apps.filter(a => a.id.toString() !== idStr && a.name !== idStr);
           await dbSet('apps', apps);
           await sendTelegramMessage(chatId, "✅ تم الحذف بنجاح.");
         }
       }
-      return res.status(200).json({ ok: true });
+      return sendJson(res, 200, { ok: true });
     }
 
-    // 2. Visit
+    // 2. Visit Route
     if (isVisit) {
       let visits = await dbGet('visits', 0);
       visits++;
       await dbSet('visits', visits);
-      return res.status(200).json({ status: 'ok' });
+      return sendJson(res, 200, { status: 'ok', visits });
     }
 
-    // 3. Site Data
+    // 3. Site Data Route
     if (isSite) {
       const visits = await dbGet('visits', 0);
       const apps = await dbGet('apps', []);
-      res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json({ visits, apps });
+      return sendJson(res, 200, { visits, apps });
     }
 
-    // 4. HTML Page
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    return res.status(200).send(getHtmlPage());
+    // 4. Default: Render HTML Page
+    return sendHtml(res, 200, getHtmlPage());
   } catch (err) {
-    console.error('Server Error:', err);
-    return res.status(500).json({ error: 'Internal Server Error' });
+    console.error('Server Handler Error:', err);
+    return sendJson(res, 500, { error: 'Internal Server Error' });
   }
-};
+}
+
+module.exports = handler;
+module.exports.default = handler;
 
 function getHtmlPage() {
   return `<!DOCTYPE html>
