@@ -7,67 +7,83 @@ const ADMIN_ID = 1249312602;
 const UPSTASH_URL = 'https://wealthy-serval-124784.upstash.io';
 const UPSTASH_TOKEN = 'ggAAAAAAedwAAIgcDHy3otuz9WTBDbUEP6rZlEx9o-kdWM5EN2CbNz_FxNz1g';
 
-function makeRequest(urlStr, options = {}, bodyData = null) {
+function upstashReq(path, method = 'GET', body = null) {
   return new Promise((resolve) => {
     try {
-      const parsedUrl = new URL(urlStr);
+      const parsedUrl = new URL(UPSTASH_URL + path);
       const reqOptions = {
         hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        port: 443,
         path: parsedUrl.pathname + parsedUrl.search,
-        method: options.method || 'GET',
-        headers: options.headers || {}
+        method: method,
+        headers: {
+          'Authorization': `Bearer ${UPSTASH_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
       };
 
-      const lib = parsedUrl.protocol === 'https:' ? https : http;
-      const req = lib.request(reqOptions, (res) => {
+      const req = https.request(reqOptions, (res) => {
         let data = '';
-        res.on('data', (chunk) => { data += chunk; });
+        res.on('data', chunk => { data += chunk; });
         res.on('end', () => {
-          resolve({
-            ok: res.statusCode >= 200 && res.statusCode < 300,
-            status: res.statusCode,
-            text: async () => data,
-            json: async () => {
-              try { return JSON.parse(data); } catch (e) { return null; }
-            }
-          });
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            resolve(null);
+          }
         });
       });
 
-      req.on('error', () => {
-        resolve({ ok: false, status: 500, text: async () => '', json: async () => null });
-      });
+      req.on('error', () => resolve(null));
 
-      if (bodyData) {
-        const payload = typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData);
-        req.setHeader('Content-Length', Buffer.byteLength(payload));
+      if (body) {
+        const payload = typeof body === 'string' ? body : JSON.stringify(body);
         req.write(payload);
       }
       req.end();
     } catch (e) {
-      resolve({ ok: false, status: 500, text: async () => '', json: async () => null });
+      resolve(null);
     }
   });
 }
 
-async function httpFetch(url, options = {}) {
-  if (typeof fetch === 'function') {
-    try { return await fetch(url, options); } catch (e) {}
-  }
-  return makeRequest(url, options, options.body);
+function telegramReq(path, method = 'GET', body = null) {
+  return new Promise((resolve) => {
+    try {
+      const parsedUrl = new URL(`https://api.telegram.org/bot${BOT_TOKEN}` + path);
+      const reqOptions = {
+        hostname: parsedUrl.hostname,
+        port: 443,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: method,
+        headers: { 'Content-Type': 'application/json' }
+      };
+
+      const req = https.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch (e) { resolve(null); }
+        });
+      });
+
+      req.on('error', () => resolve(null));
+
+      if (body) {
+        req.write(JSON.stringify(body));
+      }
+      req.end();
+    } catch (e) {
+      resolve(null);
+    }
+  });
 }
 
 async function dbGet(key, defaultValue) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return defaultValue;
   try {
-    const res = await httpFetch(`${UPSTASH_URL}/get/${key}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
-    });
-    if (!res || !res.ok) return defaultValue;
-    const data = await res.json();
-    if (data && data.result !== null && data.result !== undefined) {
-      let val = data.result;
+    const res = await upstashReq(`/get/${key}`);
+    if (res && res.result !== undefined && res.result !== null) {
+      let val = res.result;
       if (typeof val === 'string') {
         try { return JSON.parse(val); } catch (e) { return val; }
       }
@@ -80,70 +96,45 @@ async function dbGet(key, defaultValue) {
 }
 
 async function dbSet(key, value) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
   try {
     const valStr = JSON.stringify(value);
-    await httpFetch(`${UPSTASH_URL}/set/${key}`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${UPSTASH_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: valStr
-    });
+    await upstashReq(`/set/${key}`, 'POST', valStr);
   } catch (e) {
     console.error('DB Set Error:', e);
   }
 }
 
 async function sendTelegramMessage(chatId, text) {
-  try {
-    await httpFetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'Markdown' })
-    });
-  } catch (e) {
-    console.error('Telegram Error:', e);
-  }
+  await telegramReq('/sendMessage', 'POST', {
+    chat_id: chatId,
+    text: text,
+    parse_mode: 'Markdown'
+  });
 }
 
 async function getTelegramFileUrl(fileId) {
   try {
-    const res = await httpFetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-    if (res && res.ok) {
-      const data = await res.json();
-      if (data && data.ok && data.result && data.result.file_path) {
-        return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
-      }
+    const res = await telegramReq(`/getFile?file_id=${fileId}`);
+    if (res && res.ok && res.result && res.result.file_path) {
+      return `https://api.telegram.org/file/bot${BOT_TOKEN}/${res.result.file_path}`;
     }
-  } catch (e) {
-    console.error('File fetch error:', e);
-  }
+  } catch (e) {}
   return null;
 }
 
 function sendJson(res, statusCode, data) {
-  try {
-    if (res.headersSent) return;
-    res.statusCode = statusCode;
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.end(JSON.stringify(data));
-  } catch (e) {
-    console.error('sendJson Error:', e);
-  }
+  if (res.headersSent) return;
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.end(JSON.stringify(data));
 }
 
 function sendHtml(res, statusCode, html) {
-  try {
-    if (res.headersSent) return;
-    res.statusCode = statusCode;
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(html);
-  } catch (e) {
-    console.error('sendHtml Error:', e);
-  }
+  if (res.headersSent) return;
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(html);
 }
 
 async function getRequestBody(req) {
